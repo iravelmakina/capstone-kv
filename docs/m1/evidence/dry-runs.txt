@@ -1,0 +1,100 @@
+# Dry-run probes (--dry-run) and template validation
+# AWS Academy lab, profile `academy`, us-east-1, 2026-11-05. Account IDs, session
+# names and resource IDs redacted. Section numbers are the evidence numbers cited in the docs.
+
+===== [30] 30-dryrun-create-vpc =====
+$ aws ec2 create-vpc --cidr-block 10.20.0.0/16 --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVpc operation: Request would have succeeded, but DryRun flag is set.
+
+===== [31] 31-dryrun-igw =====
+$ aws ec2 create-internet-gateway --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateInternetGateway operation: Request would have succeeded, but DryRun flag is set.
+
+===== [32] 32-dryrun-sg =====
+$ aws ec2 create-security-group --group-name probe --description probe --vpc-id <default-vpc-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateSecurityGroup operation: Request would have succeeded, but DryRun flag is set.
+
+===== [33] 33-dryrun-endpoint-s3 =====
+$ aws ec2 create-vpc-endpoint --vpc-id <default-vpc-id> --vpc-endpoint-type Gateway --service-name com.amazonaws.us-east-1.s3 --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVpcEndpoint operation: Request would have succeeded, but DryRun flag is set.
+
+===== [34] 34-dryrun-endpoint-dynamodb =====
+$ aws ec2 create-vpc-endpoint --vpc-id <default-vpc-id> --vpc-endpoint-type Gateway --service-name com.amazonaws.us-east-1.dynamodb --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVpcEndpoint operation: Request would have succeeded, but DryRun flag is set.
+
+===== [35] 35-dryrun-instance-connect-ep =====
+$ aws ec2 create-instance-connect-endpoint --subnet-id <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateInstanceConnectEndpoint operation: Request would have succeeded, but DryRun flag is set.
+
+===== [36] 36-dryrun-allocate-eip =====
+$ aws ec2 allocate-address --domain vpc --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the AllocateAddress operation: Request would have succeeded, but DryRun flag is set.
+
+===== [37] 37-dryrun-t3small =====
+$ aws ec2 run-instances --image-id ami-0c230065b91270bc6 --instance-type t3.small --subnet-id <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the RunInstances operation: Request would have succeeded, but DryRun flag is set.
+
+===== [38] 38-dryrun-t3medium =====
+$ aws ec2 run-instances --image-id ami-0c230065b91270bc6 --instance-type t3.medium --subnet-id <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the RunInstances operation: Request would have succeeded, but DryRun flag is set.
+
+===== [39] 39-dryrun-t3large =====
+$ aws ec2 run-instances --image-id ami-0c230065b91270bc6 --instance-type t3.large --subnet-id <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the RunInstances operation: You are not authorized to perform this operation. User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: ec2:RunInstances on resource: arn:aws:ec2:us-east-1:<ACCOUNT_ID>:instance/* with an explicit deny in an identity-based policy. Encoded authorization failure message: gqUWbs50M0l2sqNsSHDzCuWxn66zqWP9d2Zq4MGXiAi9EzwgeIPyminaOQSeY5PFlg6X9Q9X_Q_lZoU2VPKZMTGUeFyuhN2azSxXcTDt55QHbsY-fbUZ4L5XGoPZvaBm6xS4Yg2msdtcV2GVyI8VIzrzsNS9QHiKzgz8l2VzDWO-WDMhqlT3KKP-v4t1TF09BNlJb4DynGwTpQZB5ive6SO2SNLjSOi_V2TKNUS1okMfSmRu5IsV7-HRO3nCMz9zsYw4bf_ruZUqch1kZ24S-1qN4_SbaY6HEQiiOwyVJoBZ6xFCgqMa5zSAyr0rctKb70F4EADPqiaeelN6xy_gkQjPN1Ar8Gdx_qMqkFK_yAHOQN6UeYUALwiM9IYNYbD38iNb3-gJaFtubycCU7rbQoFPYYIVqg9tsexkVhsAQ1ekMMbzTkkmwDSiKZJkxty1KZTIyPTRXyU92wbKWZExvdMmkZyBdKLBdGwp4Ihmk_4mxz3FMYiEh9dXM4IAWRM8kbigEzFhbmFsdMJoQ9Qst6cDN7s6Crnqxihv6X5YV8vu01_K-61duovJrMdZo4Wgt5tWBBysdBaawPCwMk_-n_LWHaIX96ZzT6QPt9TbI06xPsgkv1T6V6259tn2W2Jw82bsd3WV6XcydUwWqqAjM0-EBJUH_PNoxfl_wYaAN53JiTSDiIdusnkpDwrv44VaAWIffs-mV4qq6X0zD3ITWxmFo5wcWx28rwbtPfRNv3J3xn1AOXxoGQg6bbJbTpawY0tFbKSvztGfzTMTiKaXID4LgBfv9V06u3pasJOev7G-2H2418N45C2Pq_obhU_ce4bZoDPvBpSmANeFelLF19TT7APm4Vl6WAVYhhKP8W_jIG_QKsz94vsEowXME4L4w83CNPv-fr9vLlYGwaRHdbXQhYW54i8MiV1iWS2jAjagM9MRl7jYhprnpoGIoMvVavl8T5-g8CjRgIQWb8S8SAiFvAKh0lx7UmP8Mr0sWjZhww
+
+===== [40] 40-dryrun-m5xlarge =====
+$ aws ec2 run-instances --image-id ami-0c230065b91270bc6 --instance-type m5.xlarge --subnet-id <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the RunInstances operation: You are not authorized to perform this operation. User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: ec2:RunInstances on resource: arn:aws:ec2:us-east-1:<ACCOUNT_ID>:instance/* with an explicit deny in an identity-based policy. Encoded authorization failure message: 7aKonkf7u-CGfrocorxfh_ejAKLaOZqPdJTcxoQBPtoTsDYIL05ZpF926kaRZW-CR43NjmvosavnKr7V32tdN_DSBSCoEnn17812x7yybYoX-fwgmpiHm8RcMMcYp51SXFurFy2ozLfiW0VsHs7Qb2CRFqdJq-YpIHWVsXy5KhAPFUuLjJ9-SQ2_MjDAxS4u7Dl3rA62PKAEp-3m6RgisNMCowrjEKFDVN4uMMIWy9jWbZkmG3K8qcLIZiBVzcTCVvziF0Fxgx5p-OWdZL9YiXUvXYWhTzSTAv1Hb5cRMdLf1wAVUa0RyA-HdiwYjlYDdxhKqM-VuL26HPUG_fg8P3WdC7CVPcuQ7oIwkkxTTFg-_G360rx0_lgrnLyvZCC2fUGRYunVnxM7WbR3zGH23Nveed7HloGpmei0Cu3rfSxU_Kpoa-xZ0meGWc6Bx9yqifEAETi9ey05zljZ3d5E0w73pagMbqiUSKJnA_oorz8O2-ZgraowZzpDqTblJFkX_vcY7C81XbVCEsjOEa6sXFqAn2M2sRWt-bl8VmeFAEYiGmi6JKGeiu7dgd4VEunkxdJQQ1XmOsWcVXi2U6gNwGBCmNxX1-IXMn0SSZial_j1r0EWQ1-DNtc0oQLXyG-mCEne6LaypOCyXjViycQ0MbZ7XiCVXKvZtkru2teHuNdIMJX8_kj-UnVDG5GNkjWK0hP5wBCpUkfDjSKXmxE7udAOWfR8S_7PsI6HhTFg7ctwZucc21GVeFGs5byvu3aXwzxEIaEstvUEIh-4EI5LNG6EC89_YG8mUovmGc_WFPM0fEOq-tmgqujMHHp66tmw04KgsjHseH0Hin5w_xd-RIUUOuZmsEK3ulmPDhqDBcC43nH808ClLRNVIdCRLwcc5cLu80SNjTprkVxQeUu56Inxy0AR6moFoUopgFtIuransot9uSs0AqADKmB99r-QJ82fwOAxbq7LSAPVyZr7PtC0hTgdN17KrWOltcQwF0K__jae
+
+===== [41] 41-dryrun-t3small-with-role =====
+$ aws ec2 run-instances --image-id ami-0c230065b91270bc6 --instance-type t3.small --subnet-id <default-subnet-id> --iam-instance-profile Name=Inventory-App-Role --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the RunInstances operation: Request would have succeeded, but DryRun flag is set.
+
+===== [42] 42-dryrun-interface-endpoint-logs =====
+$ aws ec2 create-vpc-endpoint --vpc-id <default-vpc-id> --vpc-endpoint-type Interface --service-name com.amazonaws.us-east-1.logs --subnet-ids <default-subnet-id> --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVpcEndpoint operation: Request would have succeeded, but DryRun flag is set.
+
+===== [44] 44-cfn-validate =====
+$ aws cloudformation validate-template --template-body {"Resources":{"P":{"Type":"AWS::CloudFormation::WaitConditionHandle"}}}
+
+{
+    "Parameters": []
+}
+
+===== [64] 64-dryrun-launch-template =====
+$ aws ec2 create-launch-template --launch-template-name velmakina-probe --launch-template-data '{"ImageId":"ami-0c230065b91270bc6","InstanceType":"t3.small"}' --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateLaunchTemplate operation: Request would have succeeded, but DryRun flag is set.
+
+===== [65] 65-dryrun-create-volume =====
+$ aws ec2 create-volume --availability-zone us-east-1a --size 8 --volume-type gp3 --dry-run
+
+
+aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVolume operation: Request would have succeeded, but DryRun flag is set.

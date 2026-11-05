@@ -1,0 +1,167 @@
+# Identity and roles: who we are, which roles exist, their policies and trust, and the real IAM create attempts
+# AWS Academy lab, profile `academy`, us-east-1, 2026-11-05. Account IDs, session
+# names and resource IDs redacted. Section numbers are the evidence numbers cited in the docs.
+
+===== [01] 01-caller-identity =====
+$ aws sts get-caller-identity
+
+{
+    "UserId": "<ROLE_ID>:<SESSION_NAME>",
+    "Account": "<ACCOUNT_ID>",
+    "Arn": "arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME>"
+}
+
+===== [02] 02-role-LabRole =====
+$ aws iam get-role --role-name LabRole --query Role.[RoleName,MaxSessionDuration,AssumeRolePolicyDocument,PermissionsBoundary]
+
+
+aws: [ERROR]: An error occurred (NoSuchEntity) when calling the GetRole operation: The role with name LabRole cannot be found.
+
+===== [02] 02-role-voclabs =====
+$ aws iam get-role --role-name voclabs --query Role.[RoleName,MaxSessionDuration,AssumeRolePolicyDocument,PermissionsBoundary]
+
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the GetRole operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: iam:GetRole on resource: role voclabs with an explicit deny in an identity-based policy. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/2nwce9wthju3s5qgm1oybjv0v for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 2nwce9wthju3s5qgm1oybjv0v
+
+===== [03] 03-voclabs-attached =====
+$ aws iam list-attached-role-policies --role-name voclabs
+
+{
+    "AttachedPolicies": [
+        {
+            "PolicyName": "ReadOnlyAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        }
+    ]
+}
+
+===== [04] 04-voclabs-inline =====
+$ aws iam list-role-policies --role-name voclabs
+
+{
+    "PolicyNames": [
+        "Pvoclabs"
+    ]
+}
+
+===== [05] 05-instance-profiles =====
+$ aws iam list-instance-profiles --query InstanceProfiles[].[InstanceProfileName,Roles[0].RoleName]
+
+[
+    [
+        "EMR_EC2_DefaultRole",
+        "EMR_EC2_DefaultRole"
+    ],
+    [
+        "Inventory-App-Role",
+        "Inventory-App-Role"
+    ]
+]
+
+===== [06] 06-voclabs-inline-Pvoclabs =====
+$ aws iam get-role-policy --role-name voclabs --policy-name Pvoclabs
+
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the GetRolePolicy operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: iam:GetRolePolicy on resource: role voclabs with an explicit deny in an identity-based policy. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/4pgjnez4sp4l7u3uxbxr7vhm for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 4pgjnez4sp4l7u3uxbxr7vhm
+
+===== [07] 07-list-roles =====
+$ aws iam list-roles --query Roles[].RoleName
+
+[
+    "AWSServiceRoleForAmazonElasticFileSystem",
+    "AWSServiceRoleForAutoScaling",
+    "AWSServiceRoleForAWSCloud9",
+    "AWSServiceRoleForBackup",
+    "AWSServiceRoleForCloudWatchEvents",
+    "AWSServiceRoleForElastiCache",
+    "AWSServiceRoleForOrganizations",
+    "AWSServiceRoleForSupport",
+    "AWSServiceRoleForTrustedAdvisor",
+    "EMR_AutoScaling_DefaultRole",
+    "EMR_DefaultRole",
+    "EMR_EC2_DefaultRole",
+    "Inventory-App-Role",
+    "vocareum",
+    "vocareum-eventbridge",
+    "voclabs"
+]
+
+===== [09] 09-inventory-role-attached =====
+$ aws iam list-attached-role-policies --role-name Inventory-App-Role
+
+{
+    "AttachedPolicies": [
+        {
+            "PolicyName": "AmazonSSMManagedInstanceCore",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        },
+        {
+            "PolicyName": "ReadOnlyAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        }
+    ]
+}
+
+===== [10] 10-inventory-role-inline =====
+$ aws iam list-role-policies --role-name Inventory-App-Role
+
+{
+    "PolicyNames": [
+        "secretsaccess"
+    ]
+}
+
+===== [52] 52-inventory-role-secretsaccess =====
+$ aws iam get-role-policy --role-name Inventory-App-Role --policy-name secretsaccess
+
+{
+    "RoleName": "Inventory-App-Role",
+    "PolicyName": "secretsaccess",
+    "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": [
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:PutSecretValue",
+                    "secretsmanager:ListSecrets",
+                    "secretsmanager:UpdateSecret"
+                ],
+                "Resource": "arn:aws:secretsmanager:*:<ACCOUNT_ID>:secret:*",
+                "Effect": "Allow"
+            }
+        ]
+    }
+}
+
+===== [53] 53-inventory-role-trust =====
+$ aws iam get-role --role-name Inventory-App-Role --query Role.AssumeRolePolicyDocument
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+
+===== [60] 60-real-create-role =====
+$ aws iam create-role --role-name velmakina-probe-role --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the CreateRole operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: iam:CreateRole on resource: arn:aws:iam::<ACCOUNT_ID>:role/velmakina-probe-role because no identity-based policy allows the iam:CreateRole action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/8ukur0eqdpp51u0nhdr7elx1u for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 8ukur0eqdpp51u0nhdr7elx1u
+exit=254
+
+===== [61] 61-real-create-policy =====
+$ aws iam create-policy --policy-name velmakina-probe-policy --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ec2:DescribeVpcs","Resource":"*"}]}'
+
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the CreatePolicy operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: iam:CreatePolicy on resource: policy velmakina-probe-policy because no identity-based policy allows the iam:CreatePolicy action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/8ewrggwhjw79xd0y5nhndbh8l for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 8ewrggwhjw79xd0y5nhndbh8l
+exit=254

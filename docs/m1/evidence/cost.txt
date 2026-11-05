@@ -1,0 +1,29 @@
+# Cost visibility: Pricing API, Cost Explorer, Budgets
+# AWS Academy lab, profile `academy`, us-east-1, 2026-11-05. Account IDs, session
+# names and resource IDs redacted. Section numbers are the evidence numbers cited in the docs.
+
+===== [45] 45-pricing-api-scp =====
+$ aws pricing get-products --region us-east-1 --service-code AmazonEC2 --max-items 1
+
+
+aws: [ERROR]: An error occurred (AccessDeniedException) when calling the GetProducts operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: pricing:GetProducts with an explicit deny in a service control policy: arn:aws:organizations::<ACCOUNT_ID>:policy/<ORG_ID>/service_control_policy/<SCP_ID>
+
+===== [68] 68-cost-visibility =====
+$ aws ce get-cost-and-usage --time-period Start=2026-11-01,End=2026-11-05 --granularity MONTHLY --metrics UnblendedCost
+RESULTSBYTIME	True
+TIMEPERIOD	2026-11-05	2026-11-01
+UNBLENDEDCOST	0	USD
+
+$ aws budgets describe-budgets --account-id <ACCOUNT_ID>
+None
+
+$ aws ec2 describe-instances  (CreditSpecification check skipped; tag-based cost allocation)
+$ aws ce list-cost-allocation-tags
+
+aws: [ERROR]: An error occurred (AccessDeniedException) when calling the ListCostAllocationTags operation: Failed to list Cost Allocation Tags: Linked account doesn't have access to cost allocation tags.
+
+$ aws iam simulate-principal-policy (voclabs) --action-names budgets:ModifyBudget budgets:ViewBudget ce:GetCostAndUsage ce:CreateAnomalyMonitor
+budgets:ModifyBudget	implicitDeny
+budgets:ViewBudget	allowed
+ce:GetCostAndUsage	allowed
+ce:CreateAnomalyMonitor	implicitDeny

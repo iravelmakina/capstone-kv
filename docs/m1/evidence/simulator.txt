@@ -1,0 +1,144 @@
+# Policy simulator results (simulate-principal-policy)
+# AWS Academy lab, profile `academy`, us-east-1, 2026-11-05. Account IDs, session
+# names and resource IDs redacted. Section numbers are the evidence numbers cited in the docs.
+
+===== [08] 08-simulate-voclabs =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/voclabs --action-names ec2:CreateVpc ec2:CreateVpcEndpoint ec2:CreateNatGateway ec2:AllocateAddress ec2:RunInstances iam:CreateRole iam:CreatePolicy iam:PassRole cloudformation:CreateStack ec2:CreateInstanceConnectEndpoint ecs:CreateCluster lambda:CreateFunction --output text --query EvaluationResults[].[EvalActionName,EvalDecision]
+
+[
+    [
+        "ec2:CreateVpc",
+        "allowed"
+    ],
+    [
+        "ec2:CreateVpcEndpoint",
+        "allowed"
+    ],
+    [
+        "ec2:CreateNatGateway",
+        "allowed"
+    ],
+    [
+        "ec2:AllocateAddress",
+        "allowed"
+    ],
+    [
+        "ec2:RunInstances",
+        "allowed"
+    ],
+    [
+        "iam:CreateRole",
+        "implicitDeny"
+    ],
+    [
+        "iam:CreatePolicy",
+        "implicitDeny"
+    ],
+    [
+        "iam:PassRole",
+        "implicitDeny"
+    ],
+    [
+        "cloudformation:CreateStack",
+        "allowed"
+    ],
+    [
+        "ec2:CreateInstanceConnectEndpoint",
+        "allowed"
+    ],
+    [
+        "ecs:CreateCluster",
+        "implicitDeny"
+    ],
+    [
+        "lambda:CreateFunction",
+        "allowed"
+    ]
+]
+
+===== [20] 20-simulate-passrole-inventory =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/voclabs --action-names iam:PassRole --resource-arns arn:aws:iam::<ACCOUNT_ID>:role/Inventory-App-Role --output text --query EvaluationResults[].[EvalActionName,EvalDecision]
+
+[
+    [
+        "iam:PassRole",
+        "allowed"
+    ]
+]
+
+===== [51] 51-simulate-pricing =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/voclabs --action-names pricing:GetProducts ec2:RunInstances --query EvaluationResults[].[EvalActionName,EvalDecision] --output text
+
+[
+    [
+        "pricing:GetProducts",
+        "explicitDeny"
+    ],
+    [
+        "ec2:RunInstances",
+        "allowed"
+    ]
+]
+
+===== [62] 62-simulate-m2-m5 =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/voclabs --action-names <M2–M5 actions>
+
+s3:CreateBucket	allowed
+s3:PutObject	allowed
+s3:PutBucketPolicy	allowed
+cloudwatch:PutMetricData	implicitDeny
+cloudwatch:PutMetricAlarm	allowed
+cloudwatch:PutDashboard	implicitDeny
+logs:CreateLogGroup	allowed
+logs:PutLogEvents	allowed
+xray:PutTraceSegments	implicitDeny
+autoscaling:CreateAutoScalingGroup	allowed
+autoscaling:PutScalingPolicy	allowed
+ec2:CreateLaunchTemplate	allowed
+elasticloadbalancing:CreateLoadBalancer	allowed
+elasticloadbalancing:CreateTargetGroup	allowed
+codepipeline:CreatePipeline	implicitDeny
+codebuild:CreateProject	implicitDeny
+codedeploy:CreateApplication	implicitDeny
+codeconnections:CreateConnection	explicitDeny
+iam:CreateOpenIDConnectProvider	implicitDeny
+ssm:SendCommand	allowed
+ssm:StartSession	allowed
+sqs:CreateQueue	implicitDeny
+sns:CreateTopic	allowed
+kafka:CreateCluster	explicitDeny
+mq:CreateBroker	explicitDeny
+kinesis:CreateStream	implicitDeny
+secretsmanager:CreateSecret	allowed
+ecr:CreateRepository	implicitDeny
+servicediscovery:CreatePrivateDnsNamespace	implicitDeny
+route53:CreateHostedZone	allowed
+dynamodb:CreateTable	implicitDeny
+events:PutRule	allowed
+ec2:CreateVolume	allowed
+ec2:CreateSnapshot	allowed
+sts:AssumeRole	implicitDeny
+
+===== [63] 63-simulate-instance-role =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/Inventory-App-Role --action-names <instance-side actions>
+
+cloudwatch:PutMetricData	implicitDeny
+logs:CreateLogGroup	implicitDeny
+logs:CreateLogStream	implicitDeny
+logs:PutLogEvents	implicitDeny
+xray:PutTraceSegments	implicitDeny
+s3:GetObject	allowed
+s3:PutObject	implicitDeny
+s3:ListBucket	allowed
+ec2:DescribeInstances	allowed
+autoscaling:DescribeAutoScalingGroups	allowed
+autoscaling:SetDesiredCapacity	implicitDeny
+sns:Publish	implicitDeny
+ssm:UpdateInstanceInformation	allowed
+secretsmanager:GetSecretValue	implicitDeny
+ec2:RunInstances	implicitDeny
+
+===== [66] 66-simulate-resource-scoped =====
+$ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/Inventory-App-Role --action-names secretsmanager:GetSecretValue --resource-arns arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:probe
+
+secretsmanager:GetSecretValue	allowed

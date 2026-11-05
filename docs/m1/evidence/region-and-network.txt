@@ -1,0 +1,120 @@
+# Regions, AZs, instance offerings, existing VPCs, stacks and the lab's own resources
+# AWS Academy lab, profile `academy`, us-east-1, 2026-11-05. Account IDs, session
+# names and resource IDs redacted. Section numbers are the evidence numbers cited in the docs.
+
+===== [11] 11-region-probe =====
+us-east-1: 2
+us-west-2: 1
+eu-central-1: 
+aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the DescribeVpcs operation: You are not authorized to perform this operation. User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/
+
+===== [12] 12-azs-use1 =====
+$ aws ec2 describe-availability-zones --output text --query AvailabilityZones[].[ZoneName,ZoneId]
+
+[
+    [
+        "us-east-1a",
+        "use1-az2"
+    ],
+    [
+        "us-east-1b",
+        "use1-az4"
+    ],
+    [
+        "us-east-1c",
+        "use1-az6"
+    ],
+    [
+        "us-east-1d",
+        "use1-az1"
+    ],
+    [
+        "us-east-1e",
+        "use1-az3"
+    ],
+    [
+        "us-east-1f",
+        "use1-az5"
+    ]
+]
+
+===== [13] 13-t3small-offerings-use1 =====
+$ aws ec2 describe-instance-type-offerings --location-type availability-zone-id --filters Name=instance-type,Values=t3.small --output text --query InstanceTypeOfferings[].Location
+
+[
+    "use1-az4",
+    "use1-az2",
+    "use1-az1",
+    "use1-az5",
+    "use1-az6"
+]
+
+===== [14] 14-vpcs-use1 =====
+$ aws ec2 describe-vpcs --output text --query Vpcs[].[CidrBlock,IsDefault,Tags[?Key==`Name`].Value|[0]]
+
+[
+    [
+        "172.31.0.0/16",
+        true,
+        null
+    ],
+    [
+        "10.0.0.0/16",
+        false,
+        "Project VPC"
+    ]
+]
+
+===== [15] 15-stacks-use1 =====
+$ aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE --output text --query StackSummaries[].[StackName,StackStatus]
+
+[
+    [
+        "c229528a5781608l18172296t1w<ACCOUNT_ID>",
+        "CREATE_COMPLETE"
+    ]
+]
+
+===== [54] 54-igw-count =====
+$ aws ec2 describe-internet-gateways --query length(InternetGateways)
+
+2
+
+===== [67] 67-lab-existing-resources =====
+# Resources that already exist in the lab (us-east-1), checked for running cost
+
+$ aws cloudformation list-stack-resources --stack-name <lab-stack>  (resource types)
+   1 AWS::EC2::EIP
+   1 AWS::EC2::InternetGateway
+   1 AWS::EC2::LaunchTemplate
+   1 AWS::EC2::NatGateway
+   2 AWS::EC2::Route
+   3 AWS::EC2::RouteTable
+   3 AWS::EC2::SecurityGroup
+   6 AWS::EC2::Subnet
+   6 AWS::EC2::SubnetRouteTableAssociation
+   1 AWS::EC2::VPC
+   1 AWS::EC2::VPCGatewayAttachment
+   1 AWS::IAM::InstanceProfile
+   1 AWS::IAM::Role
+   1 AWS::RDS::DBSubnetGroup
+
+$ aws ec2 describe-nat-gateways  (state, created)
+available	2026-11-05T10:44:42+00:00
+
+$ aws ec2 describe-addresses  (count)
+1
+
+$ aws ec2 describe-instances  (running)
+0
+
+$ aws ec2 describe-volumes  (count, GiB)
+0	0
+
+$ aws ec2 describe-vpc-endpoints  (type, service)
+
+$ aws rds describe-db-instances  (count)
+0
+
+$ aws elbv2 describe-load-balancers  (count)
+0
