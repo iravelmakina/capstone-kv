@@ -39,6 +39,7 @@
 - [x] 5.2 Check both policies with `simulate-custom-policy` against the data-action list in ADR-0006 (all `explicitDeny`) and a few view actions (`allowed`); record results
 - [x] 5.3 `validate-template` passes (evidence 71); the refusal is shown by real `create-role`/`create-policy` attempts (60–61), since a change set alone creates nothing and wouldn't prove it; `docs/m1/iam-readonly.md` explains the refusal and what the template would do
 - [ ] 5.4 After ADR-0007 is accepted and committed: list every view action by name (no action wildcards); `cfn-lint` passes; the simulator shows the listed actions `allowed`, the dropped ones (`lambda:ListFunctions`, `ec2:DescribeInstanceAttribute`, `rds:DescribeDBInstances`) not `allowed`
+- [ ] 5.5 After ADR-0008 is accepted and committed: split the view policy into six per-service policies (same actions and scoping); `cfn-lint` passes; simulator result unchanged
 
 ## 6. Network stack
 

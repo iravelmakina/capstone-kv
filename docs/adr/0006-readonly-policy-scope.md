@@ -3,6 +3,7 @@
 - Status: **Accepted** — 2026-11-05 by Iryna Velmakina (author). Drafted with Claude Code; revised after an independent AI design review (`docs/m1/ai-review.md`).
 - Date: 2026-11-05
 - Superseded in part by ADR-0007: the view policy's action wildcards.
+- Superseded in part by ADR-0008: "as two policies".
 
 ## Context
 
