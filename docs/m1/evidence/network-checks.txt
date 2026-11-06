@@ -1,0 +1,315 @@
+# Checks of the deployed network stack velmakina-kv-network against the network-foundation spec
+# AWS Academy lab, us-east-1, 2026-11-05T13:22Z. Account IDs redacted.
+
+===== [80] vpc =====
+$ aws ec2 describe-vpcs --vpc-ids vpc-02cc81805fd1e5a18 --query Vpcs[0].{Cidr:CidrBlock,Tags:Tags} --output json
+
+{
+    "Cidr": "10.20.0.0/16",
+    "Tags": [
+        {
+            "Key": "Name",
+            "Value": "velmakina-kv-vpc"
+        },
+        {
+            "Key": "aws:cloudformation:logical-id",
+            "Value": "Vpc"
+        },
+        {
+            "Key": "Project",
+            "Value": "capstone-kv"
+        },
+        {
+            "Key": "aws:cloudformation:stack-id",
+            "Value": "arn:aws:cloudformation:us-east-1:<ACCOUNT_ID>:stack/velmakina-kv-network/b183df30-d91b-11f1-87e7-0effcef6605d"
+        },
+        {
+            "Key": "aws:cloudformation:stack-name",
+            "Value": "velmakina-kv-network"
+        }
+    ]
+}
+
+===== [81] vpc-dns-support =====
+$ aws ec2 describe-vpc-attribute --vpc-id vpc-02cc81805fd1e5a18 --attribute enableDnsSupport --query EnableDnsSupport.Value
+
+true
+
+===== [82] vpc-dns-hostnames =====
+$ aws ec2 describe-vpc-attribute --vpc-id vpc-02cc81805fd1e5a18 --attribute enableDnsHostnames --query EnableDnsHostnames.Value
+
+true
+
+===== [83] subnets =====
+$ aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-02cc81805fd1e5a18 --query sort_by(Subnets,&CidrBlock)[].[Tags[?Key==`Name`].Value|[0],AvailabilityZoneId,CidrBlock,MapPublicIpOnLaunch] --output table
+
+------------------------------------------------------------------
+|                         DescribeSubnets                        |
++-------------------------+-----------+-----------------+--------+
+|  velmakina-kv-public-a  |  use1-az1 |  10.20.0.0/20   |  False |
+|  velmakina-kv-public-b  |  use1-az2 |  10.20.16.0/20  |  False |
+|  velmakina-kv-public-c  |  use1-az4 |  10.20.32.0/20  |  False |
+|  velmakina-kv-private-a |  use1-az1 |  10.20.64.0/20  |  False |
+|  velmakina-kv-private-b |  use1-az2 |  10.20.80.0/20  |  False |
+|  velmakina-kv-private-c |  use1-az4 |  10.20.96.0/20  |  False |
++-------------------------+-----------+-----------------+--------+
+
+===== [84] route-tables =====
+$ aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-02cc81805fd1e5a18 --query RouteTables[?Tags[?Key==`Name`]].{Name:Tags[?Key==`Name`].Value|[0],Routes:Routes[].[DestinationCidrBlock||DestinationPrefixListId,GatewayId]} --output json
+
+[
+    {
+        "Name": "velmakina-kv-private-rt-b",
+        "Routes": [
+            [
+                "10.20.0.0/16",
+                "local"
+            ],
+            [
+                "pl-63a5400a",
+                "vpce-0e61651c57f6f7b3c"
+            ]
+        ]
+    },
+    {
+        "Name": "velmakina-kv-private-rt-c",
+        "Routes": [
+            [
+                "10.20.0.0/16",
+                "local"
+            ],
+            [
+                "pl-63a5400a",
+                "vpce-0e61651c57f6f7b3c"
+            ]
+        ]
+    },
+    {
+        "Name": "velmakina-kv-public-rt",
+        "Routes": [
+            [
+                "10.20.0.0/16",
+                "local"
+            ],
+            [
+                "0.0.0.0/0",
+                "igw-0c2c00af4c8327a89"
+            ]
+        ]
+    },
+    {
+        "Name": "velmakina-kv-private-rt-a",
+        "Routes": [
+            [
+                "10.20.0.0/16",
+                "local"
+            ],
+            [
+                "pl-63a5400a",
+                "vpce-0e61651c57f6f7b3c"
+            ]
+        ]
+    }
+]
+
+===== [85] s3-endpoint =====
+$ aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=vpc-02cc81805fd1e5a18 --query VpcEndpoints[].{Type:VpcEndpointType,Service:ServiceName,RouteTables:length(RouteTableIds)} --output table
+
+----------------------------------------------------------
+|                  DescribeVpcEndpoints                  |
++--------------+------------------------------+----------+
+|  RouteTables |           Service            |  Type    |
++--------------+------------------------------+----------+
+|  3           |  com.amazonaws.us-east-1.s3  |  Gateway |
++--------------+------------------------------+----------+
+
+===== [86] exports =====
+$ aws cloudformation list-exports --query Exports[?starts_with(Name,'velmakina-kv-network-')].[Name,Value] --output table
+
+---------------------------------------------------------------------
+|                            ListExports                            |
++--------------------------------------+----------------------------+
+|  velmakina-kv-network-AzIdA          |  use1-az1                  |
+|  velmakina-kv-network-AzIdB          |  use1-az2                  |
+|  velmakina-kv-network-AzIdC          |  use1-az4                  |
+|  velmakina-kv-network-PrivateSubnetA |  subnet-078eaf5b21488d579  |
+|  velmakina-kv-network-PrivateSubnetB |  subnet-059e8ad97d3261cc3  |
+|  velmakina-kv-network-PrivateSubnetC |  subnet-05446236a26dfef9f  |
+|  velmakina-kv-network-PublicSubnetA  |  subnet-0f6c0d134c9c4105f  |
+|  velmakina-kv-network-PublicSubnetB  |  subnet-01320e6d1348b11c9  |
+|  velmakina-kv-network-PublicSubnetC  |  subnet-01ed045dedd650a79  |
+|  velmakina-kv-network-VpcCidr        |  10.20.0.0/16              |
+|  velmakina-kv-network-VpcId          |  vpc-02cc81805fd1e5a18     |
++--------------------------------------+----------------------------+
+
+===== [87] make verify =====
+$ make verify
+
+OK: no private route table has 0.0.0.0/0
+
+===== [88] make drift (fresh stack) =====
+$ make drift
+
+-----------------------------------
+|   DescribeStackResourceDrifts   |
++---------------------+-----------+
+|  InternetGateway    |  IN_SYNC  |
+|  PrivateRouteTableA |  IN_SYNC  |
+|  PrivateRouteTableB |  IN_SYNC  |
+|  PrivateRouteTableC |  IN_SYNC  |
+|  PrivateSubnetA     |  IN_SYNC  |
+|  PrivateSubnetB     |  IN_SYNC  |
+|  PrivateSubnetC     |  IN_SYNC  |
+|  PublicDefaultRoute |  IN_SYNC  |
+|  PublicRouteTable   |  IN_SYNC  |
+|  PublicSubnetA      |  IN_SYNC  |
+|  PublicSubnetB      |  IN_SYNC  |
+|  PublicSubnetC      |  IN_SYNC  |
+|  Vpc                |  IN_SYNC  |
++---------------------+-----------+
+
+===== [89] make rebuild, run 1 (started 2026-11-05T22:19:43Z) =====
+$ make rebuild
+
+velmakina-kv-network deleted
+---------------------------------------------------------------------------------------
+|                                  DescribeChangeSet                                  |
++-----+-----------------------------+-----------------------------------------+-------+
+|  Add|  InternetGatewayAttachment  |  AWS::EC2::VPCGatewayAttachment         |  None |
+|  Add|  InternetGateway            |  AWS::EC2::InternetGateway              |  None |
+|  Add|  PrivateRouteTableA         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateRouteTableB         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateRouteTableC         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateSubnetARouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetA             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PrivateSubnetBRouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetB             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PrivateSubnetCRouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetC             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicDefaultRoute         |  AWS::EC2::Route                        |  None |
+|  Add|  PublicRouteTable           |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PublicSubnetARouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetA              |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicSubnetBRouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetB              |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicSubnetCRouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetC              |  AWS::EC2::Subnet                       |  None |
+|  Add|  S3GatewayEndpoint          |  AWS::EC2::VPCEndpoint                  |  None |
+|  Add|  Vpc                        |  AWS::EC2::VPC                          |  None |
++-----+-----------------------------+-----------------------------------------+-------+
+CREATE_COMPLETE
+teardown: 63s  rebuild: 97s  total: 160s
+
+===== [90] make rebuild, run 2 (started 2026-11-05T22:22:29Z) =====
+$ make rebuild
+
+velmakina-kv-network deleted
+---------------------------------------------------------------------------------------
+|                                  DescribeChangeSet                                  |
++-----+-----------------------------+-----------------------------------------+-------+
+|  Add|  InternetGatewayAttachment  |  AWS::EC2::VPCGatewayAttachment         |  None |
+|  Add|  InternetGateway            |  AWS::EC2::InternetGateway              |  None |
+|  Add|  PrivateRouteTableA         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateRouteTableB         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateRouteTableC         |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PrivateSubnetARouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetA             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PrivateSubnetBRouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetB             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PrivateSubnetCRouteTable   |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PrivateSubnetC             |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicDefaultRoute         |  AWS::EC2::Route                        |  None |
+|  Add|  PublicRouteTable           |  AWS::EC2::RouteTable                   |  None |
+|  Add|  PublicSubnetARouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetA              |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicSubnetBRouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetB              |  AWS::EC2::Subnet                       |  None |
+|  Add|  PublicSubnetCRouteTable    |  AWS::EC2::SubnetRouteTableAssociation  |  None |
+|  Add|  PublicSubnetC              |  AWS::EC2::Subnet                       |  None |
+|  Add|  S3GatewayEndpoint          |  AWS::EC2::VPCEndpoint                  |  None |
+|  Add|  Vpc                        |  AWS::EC2::VPC                          |  None |
++-----+-----------------------------+-----------------------------------------+-------+
+CREATE_COMPLETE
+teardown: 32s  rebuild: 97s  total: 129s
+
+===== [91] checks after run 2 =====
+$ make verify
+OK: no private route table has 0.0.0.0/0
+$ make drift   (13 resources)
+all IN_SYNC
+$ describe-stacks: CREATE_COMPLETE, created 2026-11-05T22:23:03Z
+$ list-exports: 11 velmakina-kv-network-* exports
+$ subnets (AZ ID, CIDR):
+use1-az1	10.20.0.0/20
+use1-az2	10.20.16.0/20
+use1-az4	10.20.32.0/20
+use1-az1	10.20.64.0/20
+use1-az2	10.20.80.0/20
+use1-az4	10.20.96.0/20
+
+===== [92] drift after an out-of-band tag change (2026-11-05T22:43:39Z) =====
+# change made outside CloudFormation by the author:
+$ aws ec2 create-tags --resources <VpcId> --tags Key=Name,Value=velmakina-kv-vpc-edited
+
+$ make drift
+
+------------------------------------
+|    DescribeStackResourceDrifts   |
++---------------------+------------+
+|  InternetGateway    |  IN_SYNC   |
+|  PrivateRouteTableA |  IN_SYNC   |
+|  PrivateRouteTableB |  IN_SYNC   |
+|  PrivateRouteTableC |  IN_SYNC   |
+|  PrivateSubnetA     |  IN_SYNC   |
+|  PrivateSubnetB     |  IN_SYNC   |
+|  PrivateSubnetC     |  IN_SYNC   |
+|  PublicDefaultRoute |  IN_SYNC   |
+|  PublicRouteTable   |  IN_SYNC   |
+|  PublicSubnetA      |  IN_SYNC   |
+|  PublicSubnetB      |  IN_SYNC   |
+|  PublicSubnetC      |  IN_SYNC   |
+|  Vpc                |  MODIFIED  |
++---------------------+------------+
+
+$ aws cloudformation describe-stack-resource-drifts --stack-name velmakina-kv-network --stack-resource-drift-status-filters MODIFIED --query 'StackResourceDrifts[].[LogicalResourceId,PropertyDifferences]'
+
+[
+    [
+        "Vpc",
+        [
+            {
+                "PropertyPath": "/Tags/0/Value",
+                "ExpectedValue": "velmakina-kv-vpc",
+                "ActualValue": "velmakina-kv-vpc-edited",
+                "DifferenceType": "NOT_EQUAL"
+            }
+        ]
+    ]
+]
+
+===== [93] drift after reverting the tag (2026-11-05T22:45:23Z) =====
+# revert, also outside CloudFormation (`make up` would find no template change to apply):
+$ aws ec2 create-tags --resources <VpcId> --tags Key=Name,Value=velmakina-kv-vpc
+
+$ make drift
+
+-----------------------------------
+|   DescribeStackResourceDrifts   |
++---------------------+-----------+
+|  InternetGateway    |  IN_SYNC  |
+|  PrivateRouteTableA |  IN_SYNC  |
+|  PrivateRouteTableB |  IN_SYNC  |
+|  PrivateRouteTableC |  IN_SYNC  |
+|  PrivateSubnetA     |  IN_SYNC  |
+|  PrivateSubnetB     |  IN_SYNC  |
+|  PrivateSubnetC     |  IN_SYNC  |
+|  PublicDefaultRoute |  IN_SYNC  |
+|  PublicRouteTable   |  IN_SYNC  |
+|  PublicSubnetA      |  IN_SYNC  |
+|  PublicSubnetB      |  IN_SYNC  |
+|  PublicSubnetC      |  IN_SYNC  |
+|  Vpc                |  IN_SYNC  |
++---------------------+-----------+
+
+$ make verify
+OK: no private route table has 0.0.0.0/0

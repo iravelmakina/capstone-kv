@@ -4,16 +4,7 @@
 > the session that drafted the design (course rule; CLAUDE.md rule 5). This file holds the
 > prompt, the transcript and my verdicts.
 
-## How to run it
-
-1. Open a new chat in any AI assistant (a new Claude.ai chat, a new Claude Code session
-   in another folder, or another vendor's model).
-2. Copy the design to the clipboard:
-   ```bash
-   cat openspec/changes/m1-infra-setup/proposal.md openspec/changes/m1-infra-setup/design.md openspec/changes/m1-infra-setup/specs/*/spec.md docs/adr/*.md docs/m1/labrole-dissection.md | pbcopy
-   ```
-3. Paste the prompt below, then the clipboard.
-4. Save the full reply under **Transcript**, then fill in **My verdicts**.
+Documents reviewed: proposal, design, the three specs, the ADRs and the dissection.
 
 ## Prompt
 
@@ -168,3 +159,22 @@ would throttle benchmarks → stay `unlimited`, budget the surplus), the overlap
 (→ `10.20.0.0/16`), "us-west-2 is a parameter change" (corrected), change sets shown
 before executing, a `make verify` route check, `NOT_CHECKED` in drift results, a teardown
 note for stateful resources, and ADR-0001 (lab 1) removed from this repo.
+
+**Decided 2026-11-06:** the console placeholder in the dissection was replaced by a real
+console check (IAM → Roles → `voclabs`: access denied by an explicit deny, evidence 95),
+since the lecturer expects the console route. Subnets and route tables are now confirmed
+by the real deploy (evidence 80–88).
+
+**Decided 2026-11-06** (proposed by the drafting session, agreed by the author): §2, "ADR-0002's comparison is skewed" →
+**partly accept; the decision stands.**
+- *CDK "refused" cites no evidence* → the evidence exists: the default `cdk bootstrap`
+  creates IAM roles (deploy, file-publishing, lookup, execution), and `voclabs` gets an
+  implicit deny on `iam:CreateRole` (simulator 08, real attempt 60). True that a custom
+  bootstrap or a synthesizer using CLI credentials avoids the roles, but that's extra setup
+  to explain and still needs a staging bucket for assets, for a gain M1 doesn't need:
+  21 resources in plain YAML don't need loops or a programming language.
+- *Terraform's "half-applied state" is overstated* → fair: Terraform records what it
+  created and a re-run continues. The real cost in this sandbox is elsewhere: the state
+  file has to live and be protected somewhere (an S3 bucket we'd create and lock).
+  CloudFormation keeps state inside AWS and rolls back on its own.
+- No ADR change: both points sharpen the arguments, neither changes the choice.

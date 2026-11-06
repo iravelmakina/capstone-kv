@@ -142,3 +142,88 @@ ec2:RunInstances	implicitDeny
 $ aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<ACCOUNT_ID>:role/Inventory-App-Role --action-names secretsmanager:GetSecretValue --resource-arns arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:probe
 
 secretsmanager:GetSecretValue	allowed
+
+===== [70] 70-simulate-readonly-policies =====
+$ aws iam simulate-custom-policy --policy-input-list <ViewPolicy> <DenyDataPolicy> --action-names <data, view and write actions>
+# policy documents extracted from infra/iam-readonly.yaml
+
+s3:GetObject	explicitDeny
+s3:GetObjectVersion	explicitDeny
+s3:ListBucket	explicitDeny
+dynamodb:GetItem	explicitDeny
+dynamodb:Query	explicitDeny
+dynamodb:Scan	explicitDeny
+dynamodb:PartiQLSelect	explicitDeny
+secretsmanager:GetSecretValue	explicitDeny
+secretsmanager:BatchGetSecretValue	explicitDeny
+ssm:GetParameter	explicitDeny
+kms:Decrypt	explicitDeny
+logs:GetLogEvents	explicitDeny
+logs:FilterLogEvents	explicitDeny
+lambda:GetFunction	explicitDeny
+cloudformation:GetTemplate	explicitDeny
+ec2:DescribeInstanceAttribute	explicitDeny
+ec2:GetConsoleOutput	explicitDeny
+ec2:DescribeVpcs	allowed
+ec2:DescribeInstances	allowed
+s3:ListAllMyBuckets	allowed
+s3:GetBucketPolicy	allowed
+iam:ListRoles	allowed
+cloudformation:DescribeStacks	allowed
+ec2:RunInstances	implicitDeny
+s3:PutObject	implicitDeny
+iam:CreateRole	implicitDeny
+dynamodb:PutItem	implicitDeny
+
+===== [72] 72-simulate-after-user-data-fix (2026-11-06) =====
+# Added ec2:DescribeLaunchTemplateVersions and autoscaling:DescribeLaunchConfigurations to
+# velmakina-deny-data: both return user data, which the ec2:Describe* / autoscaling:Describe*
+# wildcards in velmakina-view would otherwise allow. cfn-lint: no findings.
+$ aws iam simulate-custom-policy --policy-input-list <ViewPolicy> <DenyDataPolicy> --action-names <user-data reads, other data reads, the matching harmless views, writes>
+# policy documents extracted from infra/iam-readonly.yaml
+
+ec2:DescribeLaunchTemplateVersions	explicitDeny
+autoscaling:DescribeLaunchConfigurations	explicitDeny
+ec2:DescribeInstanceAttribute	explicitDeny
+lambda:GetFunctionConfiguration	explicitDeny
+s3:GetObject	explicitDeny
+secretsmanager:GetSecretValue	explicitDeny
+ec2:DescribeLaunchTemplates	allowed
+autoscaling:DescribeAutoScalingGroups	allowed
+ec2:DescribeInstances	allowed
+ec2:DescribeVpcs	allowed
+ec2:RunInstances	implicitDeny
+iam:CreateRole	implicitDeny
+
+===== [73] 73-simulate-scoped-view-policy (2026-11-06) =====
+# velmakina-view split by what AWS lets us scope: list/describe calls that accept only "*"
+# in one statement; S3 bucket settings, IAM Get and DynamoDB DescribeTable limited to
+# velmakina-* resources. cfn-lint: no findings.
+# !Sub resolved with example values (account 123456789012) to run the simulator.
+$ aws iam simulate-custom-policy --policy-input-list <ViewPolicy> <DenyDataPolicy> --action-names <action> [--resource-arns <one ARN per call>]
+
+# scoped statements: our resource vs someone else's
+s3:GetBucketPolicy	arn:aws:s3:::velmakina-builds	allowed
+s3:GetBucketPolicy	arn:aws:s3:::someone-elses-bucket	implicitDeny
+s3:GetBucketVersioning	arn:aws:s3:::velmakina-builds	allowed
+s3:GetBucketVersioning	arn:aws:s3:::someone-elses-bucket	implicitDeny
+iam:GetRole	arn:aws:iam::123456789012:role/velmakina-readonly	allowed
+iam:GetRole	arn:aws:iam::123456789012:role/voclabs	implicitDeny
+iam:GetPolicy	arn:aws:iam::123456789012:policy/velmakina-view	allowed
+iam:GetPolicy	arn:aws:iam::123456789012:policy/other-policy	implicitDeny
+dynamodb:DescribeTable	arn:aws:dynamodb:us-east-1:123456789012:table/velmakina-kv	allowed
+dynamodb:DescribeTable	arn:aws:dynamodb:us-east-1:123456789012:table/other-table	implicitDeny
+# account-wide statement (AWS accepts only *)
+ec2:DescribeVpcs	*	allowed
+s3:ListAllMyBuckets	*	allowed
+dynamodb:ListTables	arn:aws:dynamodb:${Region}:${Account}:table/*	allowed
+iam:ListRoles	arn:aws:iam::<ACCOUNT_ID>:role/	allowed
+# deny-data still wins, even on our own resources
+s3:GetObject	arn:aws:s3:::velmakina-builds/key	explicitDeny
+dynamodb:GetItem	arn:aws:dynamodb:us-east-1:123456789012:table/velmakina-kv	explicitDeny
+ec2:DescribeLaunchTemplateVersions	*	explicitDeny
+ec2:DescribeInstanceAttribute	*	explicitDeny
+# writes
+s3:PutBucketPolicy	arn:aws:s3:::velmakina-builds	implicitDeny
+ec2:RunInstances	*	implicitDeny
+iam:CreateRole	*	implicitDeny

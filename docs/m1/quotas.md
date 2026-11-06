@@ -23,7 +23,7 @@ benchmarking. Looking ahead: M3 (3 replicas per shard) = 2 × 3 + coordinator + 
 | **ECR** | denied | container images, if used | **Yes:** images come from Docker Hub or as builds via S3 | simulator (62) |
 | **Instance permissions** | instances can read S3 but not write it, and can't send CloudWatch metrics or logs | M2 nodes fetch builds from S3 | Not in M2; matters in M3–M4 | simulator (63) |
 | **Create IAM roles / pass roles** | denied, except passing `Inventory-App-Role` | instances must use `Inventory-App-Role` | **Yes:** no custom least-privilege instance role | simulator (08, 20), dry-run (41) |
-| **Lab session** | instances stop when the session ends | — | **Yes:** for long benchmarks and 24×7 uptime | Academy lab docs; to confirm on the lab page |
+| **Lab session** | 3 h per session; credentials expire at the end; stacks survive (recreate log); instances are expected to stop (not yet observed) | — | **Yes:** for long benchmarks and 24×7 uptime | lab page; Academy docs |
 | Running instances | not measured | 4 (M2), 8 (M3) | Unknown — check the lab page | — |
 | Standard-instance vCPUs | 256 | 8 (M2), 16 (M3) | No | Service Quotas (48) |
 | VPCs per region | 5 | 2 used + 1 ours | No, but a rebuild needs the slot free | (47, 14) |

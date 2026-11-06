@@ -23,7 +23,7 @@ Five methods, each with a limit:
 | 2. Policy simulator (`simulate-principal-policy`) | Allowed / implicit deny / explicit deny per action, without doing anything | It's a model. Without `--resource-arns` it tests against `*`, so permissions scoped to specific resources show as implicit deny (66). Results that matter were confirmed by method 3 |
 | 3. Dry-run (`--dry-run`) | Whether a real EC2 request would succeed | Only EC2 actions support it |
 | 4. The error message itself | Which layer refused: "no identity-based policy allows" (implicit deny), "explicit deny in an identity-based policy", or "explicit deny in a service control policy" | Only appears when something is denied |
-| 5. Console *(author: do this and add screenshots)* | Expected: IAM → Roles → `voclabs` lists the policies but refuses to open them; the console's policy simulator matches method 2 | Uses the same APIs, so same limits as methods 1–2 |
+| 5. Console (IAM → Roles → `voclabs`) | The role page doesn't open: "Access denied to iam:GetRole … an identity-based policy **explicitly denies** the action" (95). Same refusal as the CLI (02) | It calls the same IAM APIs, so it can't see more than method 1 |
 
 ## `voclabs` — what it allows and denies
 
@@ -33,7 +33,7 @@ Policies: AWS-managed `ReadOnlyAccess` + inline `Pvoclabs` (evidence 03–04).
 - Read almost everything (`ReadOnlyAccess`)
 - Network: VPCs, Internet Gateways, security groups, gateway and interface endpoints,
   Instance Connect Endpoint, Elastic IPs, NAT Gateways, Route 53 hosted zones (subnets and
-  route tables weren't probed separately; the first deploy confirms them)
+  route tables weren't probed separately; the first deploy confirmed them, evidence 80–88)
 - Compute: t3.small and t3.medium with `Inventory-App-Role`, launch templates, EBS
   volumes and snapshots, Auto Scaling groups and scaling policies, load balancers
 - Other: CloudFormation, S3 buckets and bucket policies, CloudWatch Logs and alarms,
@@ -78,16 +78,5 @@ The most useful example for the control question: `ReadOnlyAccess` **allows**
 
 ## Why the sandbox refuses our IAM template
 
-Creating the template's policy and role needs `iam:CreatePolicy` and `iam:CreateRole`.
-The simulator predicted an implicit deny for both (08). Real attempts confirmed it
-(60–61, nothing was created):
-
-> `is not authorized to perform: iam:CreateRole on resource: …role/velmakina-probe-role
-> because no identity-based policy allows the iam:CreateRole action`
-
-> `is not authorized to perform: iam:CreatePolicy on resource: policy velmakina-probe-policy
-> because no identity-based policy allows the iam:CreatePolicy action`
-
-"No identity-based policy allows" means an **implicit** deny: nothing grants the action.
-It isn't an explicit Deny statement and it isn't an SCP. Either kind of explicit deny
-would have been named in the message.
+Implicit deny on `iam:CreateRole` and `iam:CreatePolicy`: predicted by the simulator (08),
+confirmed by real attempts (60–61). Quotes and explanation: [`iam-readonly.md`](iam-readonly.md).

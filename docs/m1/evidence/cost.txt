@@ -27,3 +27,11 @@ budgets:ModifyBudget	implicitDeny
 budgets:ViewBudget	allowed
 ce:GetCostAndUsage	allowed
 ce:CreateAnomalyMonitor	implicitDeny
+
+===== [94] lab NAT Gateway lifetime vs lab-page spend (2026-11-05T22:50:53Z) =====
+$ aws ec2 describe-nat-gateways --query 'NatGateways[].[NatGatewayId,State,CreateTime,DeleteTime,VpcId]' --output table
+|  nat-0e662eb1fab544ad0|  available |  2026-11-05T10:44:42+00:00  |  None |  vpc-0073cf828334940bf  |
+
+Lab page at about the same time: "Used $0.2 of $60", accumulated lab time 220 min.
+The NAT has existed for ~12 h without a break (it survived the lab session ending).
+12 h x $0.05/h (NAT + its IPv4) = ~$0.60 expected, vs $0.20 shown: the lab meter lags.

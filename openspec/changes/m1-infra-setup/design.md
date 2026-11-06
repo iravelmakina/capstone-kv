@@ -66,4 +66,5 @@ New repo. Rollback is `make down`.
 
 ## Open Questions
 
-- The lab budget (shown on the lab page).
+- Lab budget found: $60 (`docs/m1/budget.md`). Still open: is it per course or per month,
+  and does the lab's own NAT Gateway count against it (ask the lecturer; Cost Explorer).

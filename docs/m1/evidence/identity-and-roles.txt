@@ -165,3 +165,13 @@ $ aws iam create-policy --policy-name velmakina-probe-policy --policy-document '
 
 aws: [ERROR]: An error occurred (AccessDenied) when calling the CreatePolicy operation: User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME> is not authorized to perform: iam:CreatePolicy on resource: policy velmakina-probe-policy because no identity-based policy allows the iam:CreatePolicy action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/8ewrggwhjw79xd0y5nhndbh8l for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 8ewrggwhjw79xd0y5nhndbh8l
 exit=254
+
+===== [95] 95-console-iam-roles-voclabs (2026-11-06, AWS console, transcribed) =====
+# Console: IAM -> Roles -> voclabs. The role page doesn't open at all.
+# Transcribed from the author's screenshot; account ID and session name redacted.
+Access denied to iam:GetRole
+You don't have permission to iam:GetRole.
+User: arn:aws:sts::<ACCOUNT_ID>:assumed-role/voclabs/<SESSION_NAME>
+Action: iam:GetRole
+Context: an identity-based policy explicitly denies the action
+# Same refusal as the CLI call in [02] 02-role-voclabs: the console uses the same IAM API.

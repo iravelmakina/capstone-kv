@@ -98,3 +98,32 @@ $ aws ec2 create-volume --availability-zone us-east-1a --size 8 --volume-type gp
 
 
 aws: [ERROR]: An error occurred (DryRunOperation) when calling the CreateVolume operation: Request would have succeeded, but DryRun flag is set.
+
+===== [71] 71-validate-templates =====
+$ aws cloudformation validate-template --template-body file://infra/network.yaml --query '{Capabilities:Capabilities,CapabilitiesReason:CapabilitiesReason,Parameters:Parameters[].ParameterKey}'
+
+{
+    "Capabilities": null,
+    "CapabilitiesReason": null,
+    "Parameters": [
+        "AzIdA",
+        "AzIdB",
+        "AzIdC",
+        "VpcCidr"
+    ]
+}
+
+$ aws cloudformation validate-template --template-body file://infra/iam-readonly.yaml --query '{Capabilities:Capabilities,CapabilitiesReason:CapabilitiesReason,Parameters:Parameters[].ParameterKey}'
+
+{
+    "Capabilities": [
+        "CAPABILITY_NAMED_IAM"
+    ],
+    "CapabilitiesReason": "The following resource(s) require capabilities: [AWS::IAM::ManagedPolicy]",
+    "Parameters": [
+        "TrustedPrincipalArn"
+    ]
+}
+
+$ cfn-lint infra/*.yaml
+(no findings)

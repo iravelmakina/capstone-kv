@@ -1,6 +1,6 @@
 # M2 monthly budget (2 shards)
 
-> **Draft** — drafted with Claude Code; author to review and fill in the lab budget.
+> **Draft** — drafted with Claude Code; author to review. Lab budget ($60) read by the author from the lab page.
 
 ## Assumptions
 
@@ -63,23 +63,42 @@ or not:
 | Its public IPv4 | 0.005 × 730 | $3.65 | $0.12 |
 | **Lab baseline** | | **≈ $36.50** | **≈ $1.20** |
 
-Whether it's removed when a session ends is unknown; Cost Explorer will show it after a
-day. We don't delete it: it belongs to the AWS capstone task.
+It is **not** removed when a session ends: created 2026-11-05 10:44 UTC, still `available`
+12 hours later, after a session had ended (evidence 94). So it bills around the clock.
+We don't delete it: it belongs to the AWS capstone task.
 
 ## Against the lab budget
 
-Lab budget: **$___** *(author: read it from the lab page)*.
+Lab budget: **$60**, read from the lab page ("Used $0.2 of $60", 2026-11-05). The page
+shows one total with no reset date, so we treat it as the budget for the **whole course**,
+not per month.
 
-| Scenario | Ours | + lab baseline (worst case) | Total |
-| --- | --- | --- | --- |
-| A — always on | $54.98 | $36.50 | **≈ $91** |
-| B — realistic | $9.82 | $36.50 | **≈ $46** |
+| Scenario | Ours / month | + lab baseline / month | Total / month | $60 lasts |
+| --- | --- | --- | --- | --- |
+| A — always on, lab NAT always on | $54.98 | $36.50 | **≈ $91** | ≈ 20 days |
+| B — realistic, lab NAT always on | $9.82 | $36.50 | **≈ $46** | ≈ 5 weeks |
+| B — realistic, if the lab NAT billed only during sessions (60 h) | $9.82 | $3.00 | **≈ $13** | ≈ 4.5 months |
 
-- **The lab's NAT Gateway, not our design, is the biggest cost.** If it runs all month it
-  costs nearly four times our realistic M2 usage.
-- Scenario A must be avoided: stop instances between sessions (the lab does this anyway).
+- **Scenario A is ruled out**: it spends the whole course budget in under three weeks.
+  Stop instances between sessions (the lab does this anyway) and `make down` anything not needed.
+- **What decides it is whether the lab's NAT counts against our $60 outside sessions.**
+  It keeps running between sessions (evidence 94), so the likely case is the middle row:
+  even realistic use spends the budget in about five weeks. The last row holds only if
+  the lab doesn't charge us for its own NAT. Cost Explorer will settle it.
 - For comparison: an always-on NAT of our own would add ≈ $37 a month, and three interface
   endpoints across 3 AZs ≈ $66. That's why ADR-0005 keeps the NAT off by default.
+
+## Actual spend vs estimate (task 8.3)
+
+| Date | Source | Actual | Estimate | Notes |
+| --- | --- | --- | --- | --- |
+| 2026-11-05 22:50 UTC | Lab page | **$0.20** used | ≈ $0.60 (lab NAT up 12 h × $0.05); M1 stack $0 | Meter lags: shows less than the NAT alone has cost (evidence 94) |
+| 2026-11-06 (read) | Cost Explorer, daily, credits excluded | Nov 1–4: **$0.00**; Nov 5: **$0.16**; Nov 6: not in yet | Nov 5: ≈ $0.66 (NAT from 10:44 UTC, 13.3 h × $0.05) | Nov 5 is marked incomplete (`**`); only a full day can be compared |
+
+The lab-page figure is behind real usage, so it can't be compared to the estimate yet.
+Next reading: Cost Explorer by service once a full day is in (`ce get-cost-and-usage`,
+from 2026-11-07). Expected: about $1.20 a day of NAT Gateway and public IPv4, and $0 for
+our stack.
 
 ## The FinOps loop
 
