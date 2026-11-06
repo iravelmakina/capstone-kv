@@ -38,6 +38,7 @@
 - [ ] 5.1 Write `infra/iam-readonly.yaml` per ADR-0006; `cfn-lint` passes
 - [ ] 5.2 Check both policies with `simulate-custom-policy` against the data-action list in ADR-0006 (all `explicitDeny`) and a few view actions (`allowed`); record results
 - [ ] 5.3 Try `validate-template` (should pass) and `create-change-set` (should fail); write `docs/m1/iam-readonly.md` with the refusal and what the template would do
+- [ ] 5.4 After ADR-0007 is accepted and committed: list every view action by name (no action wildcards); `cfn-lint` passes; the simulator shows the listed actions `allowed`, the dropped ones (`lambda:ListFunctions`, `ec2:DescribeInstanceAttribute`, `rds:DescribeDBInstances`) not `allowed`
 
 ## 6. Network stack
 
