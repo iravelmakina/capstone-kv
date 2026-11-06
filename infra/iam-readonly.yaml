@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  capstone-kv M1: view-only policy, a separate deny policy for data and secrets, and a
+  role another principal can assume with MFA. ADR-0006. NEVER DEPLOYED: the sandbox
+  denies iam:CreatePolicy and iam:CreateRole (docs/m1/labrole-dissection.md).
+
+Parameters:
+  TrustedPrincipalArn:
+    Type: String
+    Description: One IAM user or role allowed to assume the role, e.g. an auditor.
+    # A user or role ARN only. A whole account (arn:aws:iam::<id>:root) is rejected,
+    # because it would let anyone that account allows assume the role (ADR-0006, option C).
+    AllowedPattern: ^arn:aws:iam::\d{12}:(user|role)/[\w+=,.@/-]+$
+    ConstraintDescription: must be an IAM user or role ARN, not an account root
+
+Resources:
+  # Policy 1: what "view" allows. Every action is named, no wildcards (ADR-0007), and only
+  # for services this project uses. Resource is "*" only where AWS supports nothing else;
+  # everything that accepts an ARN is limited to velmakina-* resources.
+  ViewPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view
+      Description: See what resources exist and how they are configured. No writes.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # These actions don't support resource-level permissions: AWS accepts only "*".
+          - Sid: ListAndDescribeAccountWide
+            Effect: Allow
+            Action:
+              # network
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcAttribute          # DNS settings
+              - ec2:DescribeSubnets
+              - ec2:DescribeRouteTables
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeNatGateways
+              - ec2:DescribeVpcEndpoints
+              - ec2:DescribePrefixLists
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSecurityGroupRules
+              - ec2:DescribeNetworkAcls
+              - ec2:DescribeAddresses
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInstanceConnectEndpoints
+              # compute (no user data: see velmakina-deny-data)
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeVolumes
+              - ec2:DescribeLaunchTemplates       # names and versions, not their contents
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetHealth
+              - autoscaling:DescribeAutoScalingGroups
+              - autoscaling:DescribeScalingActivities
+              - autoscaling:DescribePolicies
+              # stacks, monitoring, lists
+              - cloudformation:ListStacks
+              - cloudformation:ListExports
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricData
+              - logs:DescribeLogGroups            # group names, not log contents
+              - iam:ListRoles                     # names only
+              - iam:ListPolicies
+              - s3:ListAllMyBuckets
+              - tag:GetResources                  # find everything tagged Project=capstone-kv
+            Resource: "*"
+          - Sid: ProjectStacks                    # our stacks' resources, events and drift
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackResources
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResourceDrifts
+            Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/velmakina-*/*
+          - Sid: ProjectBucketSettings            # bucket settings, not bucket contents
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:GetBucketVersioning
+              - s3:GetBucketTagging
+              - s3:GetEncryptionConfiguration
+              - s3:GetBucketPublicAccessBlock
+            Resource: !Sub arn:${AWS::Partition}:s3:::velmakina-*
+          - Sid: ProjectRolesAndPolicies          # read our own IAM documents only
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/velmakina-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/velmakina-*
+
+  # Policy 2: explicit Deny on reading stored data and secrets. Kept separate so the view
+  # policy can be reused without breaking a principal that legitimately reads data.
+  # An explicit Deny wins over any Allow, including the wildcards above (ADR-0006).
+  DenyDataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-deny-data
+      Description: Never read stored data or secrets, whatever else is attached.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyDataAndSecrets
+            Effect: Deny
+            Action:
+              - s3:GetObject*                  # object contents, versions, ACLs
+              - s3:ListBucket                  # object keys are data in a key-value store
+              - s3:ListBucketVersions
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:PartiQLSelect
+              - dynamodb:GetRecords            # stream records
+              - secretsmanager:GetSecretValue
+              - secretsmanager:BatchGetSecretValue
+              - ssm:GetParameter*
+              - kms:Decrypt
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+              - logs:StartQuery
+              - lambda:GetFunction*            # code location, environment variables
+              - cloudformation:GetTemplate
+              - ec2:DescribeInstanceAttribute  # user data often holds secrets
+              - ec2:GetConsoleOutput
+              - ec2:GetPasswordData
+              - ec2:DescribeLaunchTemplateVersions        # returns the template's user data
+              - autoscaling:DescribeLaunchConfigurations  # returns user data too
+            Resource: "*"
+
+  # The role: both policies attached; assumable only by the one trusted principal, with MFA.
+  ReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: velmakina-readonly
+      Description: View-only access for an auditor who signed in with MFA.
+      MaxSessionDuration: 3600                 # 1 hour, the minimum AWS allows
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref TrustedPrincipalArn
+            Action: sts:AssumeRole
+            Condition:
+              Bool:                            # Bool, not BoolIfExists: a missing key must fail
+                aws:MultiFactorAuthPresent: "true"
+              NumericLessThanEquals:
+                aws:MultiFactorAuthAge: 3600   # MFA used within the last hour
+      ManagedPolicyArns:
+        - !Ref ViewPolicy                      # Ref on a managed policy returns its ARN
+        - !Ref DenyDataPolicy
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt ReadOnlyRole.Arn
