@@ -61,7 +61,7 @@
 ## 9. Review and README
 
 - [x] 9.1 AI critique from a fresh session saved in `docs/m1/ai-review.md`, with verdicts on 3 points
-- [ ] 9.2 `README.md` drafted (bring up, verify, what changed); check it works from a clean clone after the first deploy
+- [x] 9.2 `README.md` drafted (bring up, verify, what changed); check it works from a clean clone after the first deploy
 - [x] 9.3 `AGENT_WORKLOG.md` has a row for every agent-made file
 - [ ] 9.4 Author reviews the drafted `docs/m1/control-questions.md` and rewrites it in own words
 
