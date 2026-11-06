@@ -2,16 +2,16 @@
 
 > **Draft** — drafted with Claude Code; author to review and rewrite in own words.
 
-Template: [`infra/iam-readonly.yaml`](../../infra/iam-readonly.yaml). Decisions: ADR-0006, ADR-0007.
+Template: [`infra/iam-readonly.yaml`](../../infra/iam-readonly.yaml). Decisions: ADR-0006, ADR-0007, ADR-0008.
 **Never deployed** — the sandbox refuses it, which is part of the task.
 
 ## What it would do
 
 | Resource | What it does |
 | --- | --- |
-| `velmakina-view` (managed policy) | Lets the holder see what exists and how it's configured, for the services this project uses: VPC and EC2, load balancers, Auto Scaling, CloudFormation, CloudWatch, log groups, S3 bucket settings, IAM. **Every action is named, no wildcards** (ADR-0007). Calls AWS accepts only on `"*"` are in one statement; stacks, bucket settings, roles and policies are limited to `velmakina-*`. No write actions. |
+| Six view policies (ADR-0008): `velmakina-view-network`, `-compute`, `-stacks`, `-monitoring`, `-s3`, `-iam` | Let the holder see what exists and how it's configured, one area per policy, for the services this project uses. **Every action is named, no wildcards** (ADR-0007). Calls AWS accepts only on `"*"` use `"*"`; stacks, bucket settings, roles and policies are limited to `velmakina-*`. No write actions. |
 | `velmakina-deny-data` (managed policy) | Explicitly denies reading stored data and secrets: S3 object contents and keys, DynamoDB items and streams, secret values, SSM parameters, KMS decrypt, log contents, Lambda code, templates, user data (instances, launch templates, launch configurations), console output. An explicit Deny beats any Allow, so this holds even if a broader policy is attached later. |
-| `velmakina-readonly` (role) | Has both policies. Only the IAM user or role given as `TrustedPrincipalArn` can assume it, and only with MFA used in the last hour. Sessions last at most 1 hour. A whole-account principal (`…:root`) is rejected by the parameter pattern. |
+| `velmakina-readonly` (role) | Has all seven policies. Only the IAM user or role given as `TrustedPrincipalArn` can assume it, and only with MFA used in the last hour. Sessions last at most 1 hour. A whole-account principal (`…:root`) is rejected by the parameter pattern. |
 
 Example: an auditor in another account signs in with MFA, calls `sts:AssumeRole` on
 `velmakina-readonly`, and gets temporary credentials that can list every VPC and bucket and read our project's
@@ -25,7 +25,7 @@ settings, but can't read a single object, item, secret or log line, and can't ch
 | CloudFormation `validate-template` | valid; needs `CAPABILITY_NAMED_IAM` because the policies and role have fixed names | 71 |
 | `simulate-custom-policy` with both policies | 17 data/secret reads → `explicitDeny`; 6 view actions → `allowed`; 4 writes → `implicitDeny` | 70 (`simulator.txt`) |
 | Same, after two fixes from the lecture review: user data in launch templates/configurations denied, view policy scoped to `velmakina-*` | user-data reads → `explicitDeny`; our bucket, role, policy, table → `allowed`, someone else's → `implicitDeny`; account-wide lists `allowed`; data reads on our own resources `explicitDeny`; writes `implicitDeny` | 72–73 |
-| Same, after naming every action (ADR-0007) | *to run when lab credentials are refreshed* | — |
+| Same, after naming every action (ADR-0007) and splitting per service (ADR-0008) | *to run when lab credentials are refreshed*. The split itself was checked offline: the same 79 action–resource pairs before and after | — |
 
 ## No wildcards, and where `Resource: "*"` remains
 
@@ -38,12 +38,12 @@ isn't allowed, including any API AWS adds later.
 **Resources:** `"*"` means "any resource in the account". It remains only where AWS gives
 no choice:
 
-| Statement | Resource | Why |
+| Policy (statement) | Resource | Why |
 | --- | --- | --- |
-| `ListAndDescribeAccountWide` | `"*"` | calls such as `ec2:DescribeVpcs`, `s3:ListAllMyBuckets`, `cloudformation:ListStacks` don't support resource-level permissions: AWS accepts only `"*"`. A tag condition doesn't help either: a list call has no single resource to read a tag from |
-| `ProjectStacks` | `…:stack/velmakina-*/*` | stack details, events and drift accept a stack ARN |
-| `ProjectBucketSettings` | `arn:aws:s3:::velmakina-*` | bucket settings accept a bucket ARN |
-| `ProjectRolesAndPolicies` | `…:role/velmakina-*`, `…:policy/velmakina-*` | IAM reads accept role and policy ARNs |
+| `-network`, `-compute`, `-monitoring`; `-stacks` (`ListStacksAndTags`); `-s3` (`ListBuckets`); `-iam` (`ListIam`) | `"*"` | list and describe calls such as `ec2:DescribeVpcs`, `s3:ListAllMyBuckets`, `cloudformation:ListStacks` don't support resource-level permissions: AWS accepts only `"*"`. A tag condition doesn't help either: a list call has no single resource to read a tag from |
+| `-stacks` (`ProjectStacks`) | `…:stack/velmakina-*/*` | stack details, events and drift accept a stack ARN |
+| `-s3` (`ProjectBucketSettings`) | `arn:aws:s3:::velmakina-*` | bucket settings accept a bucket ARN |
+| `-iam` (`ProjectRolesAndPolicies`) | `…:role/velmakina-*`, `…:policy/velmakina-*` | IAM reads accept role and policy ARNs |
 
 **The Deny stays as a safety net.** `velmakina-deny-data` still explicitly denies the
 known secret reads (user data, Lambda environment variables, console output, passwords)

@@ -13,7 +13,7 @@ Architectures course (2026/27), in the AWS Academy sandbox. Course brief:
 | Item | Where |
 | --- | --- |
 | Network stack: VPC `10.20.0.0/16`, 3 public + 3 private subnets in 3 AZs, Internet Gateway, S3 gateway endpoint, one export per ID | [`infra/network.yaml`](infra/network.yaml) |
-| View-only policy, data/secret deny policy and assumable role (not deployable in the sandbox) | [`infra/iam-readonly.yaml`](infra/iam-readonly.yaml), [`docs/m1/iam-readonly.md`](docs/m1/iam-readonly.md) |
+| View-only policies (one per service area), data/secret deny policy and assumable role (not deployable in the sandbox) | [`infra/iam-readonly.yaml`](infra/iam-readonly.yaml), [`docs/m1/iam-readonly.md`](docs/m1/iam-readonly.md) |
 | What the lab role allows and denies, and how we found out | [`docs/m1/labrole-dissection.md`](docs/m1/labrole-dissection.md) |
 | Quotas and budget for M2 | [`docs/m1/quotas.md`](docs/m1/quotas.md), [`docs/m1/budget.md`](docs/m1/budget.md) |
 | Teardown-and-rebuild log | [`docs/m1/recreate-log.md`](docs/m1/recreate-log.md) |
