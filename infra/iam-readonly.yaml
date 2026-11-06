@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  capstone-kv M1: view-only policy, a separate deny policy for data and secrets, and a
-  role another principal can assume with MFA. ADR-0006. NEVER DEPLOYED: the sandbox
+  capstone-kv M1: view-only policies per service, a separate deny policy for data and
+  secrets, and a role another principal can assume with MFA. ADRs 0006-0008. NEVER DEPLOYED: the sandbox
   denies iam:CreatePolicy and iam:CreateRole (docs/m1/labrole-dissection.md).
 
 Parameters:
@@ -14,22 +14,20 @@ Parameters:
     ConstraintDescription: must be an IAM user or role ARN, not an account root
 
 Resources:
-  # Policy 1: what "view" allows. Every action is named, no wildcards (ADR-0007), and only
-  # for services this project uses. Resource is "*" only where AWS supports nothing else;
-  # everything that accepts an ARN is limited to velmakina-* resources.
-  ViewPolicy:
+  # View policies, one per area (ADR-0008). Every action is named, no wildcards
+  # (ADR-0007). Resource is "*" only for list/describe calls that accept nothing else
+  # (no resource-level permissions); everything that accepts an ARN is limited to velmakina-*.
+  ViewNetworkPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: velmakina-view
-      Description: See what resources exist and how they are configured. No writes.
+      ManagedPolicyName: velmakina-view-network
+      Description: See the VPC and its network configuration.
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # These actions don't support resource-level permissions: AWS accepts only "*".
-          - Sid: ListAndDescribeAccountWide
+          - Sid: DescribeNetwork
             Effect: Allow
             Action:
-              # network
               - ec2:DescribeVpcs
               - ec2:DescribeVpcAttribute          # DNS settings
               - ec2:DescribeSubnets
@@ -45,7 +43,18 @@ Resources:
               - ec2:DescribeNetworkInterfaces
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeInstanceConnectEndpoints
-              # compute (no user data: see velmakina-deny-data)
+            Resource: "*"
+  ViewComputePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view-compute
+      Description: See instances, volumes, load balancers and Auto Scaling. No user data.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DescribeCompute
+            Effect: Allow
+            Action:
               - ec2:DescribeInstances
               - ec2:DescribeInstanceStatus
               - ec2:DescribeVolumes
@@ -57,19 +66,23 @@ Resources:
               - autoscaling:DescribeAutoScalingGroups
               - autoscaling:DescribeScalingActivities
               - autoscaling:DescribePolicies
-              # stacks, monitoring, lists
+            Resource: "*"
+  ViewStacksPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view-stacks
+      Description: See which stacks exist; details, events and drift of our stacks only.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListStacksAndTags
+            Effect: Allow
+            Action:
               - cloudformation:ListStacks
               - cloudformation:ListExports
-              - cloudwatch:DescribeAlarms
-              - cloudwatch:ListMetrics
-              - cloudwatch:GetMetricData
-              - logs:DescribeLogGroups            # group names, not log contents
-              - iam:ListRoles                     # names only
-              - iam:ListPolicies
-              - s3:ListAllMyBuckets
               - tag:GetResources                  # find everything tagged Project=capstone-kv
             Resource: "*"
-          - Sid: ProjectStacks                    # our stacks' resources, events and drift
+          - Sid: ProjectStacks
             Effect: Allow
             Action:
               - cloudformation:DescribeStacks
@@ -77,7 +90,36 @@ Resources:
               - cloudformation:DescribeStackEvents
               - cloudformation:DescribeStackResourceDrifts
             Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/velmakina-*/*
-          - Sid: ProjectBucketSettings            # bucket settings, not bucket contents
+  ViewMonitoringPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view-monitoring
+      Description: See alarms, metrics and log group names. No log contents.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DescribeMonitoring
+            Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricData
+              - logs:DescribeLogGroups            # group names, not log contents
+            Resource: "*"
+  ViewS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view-s3
+      Description: See the bucket list and the settings of our buckets. No contents.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListBuckets
+            Effect: Allow
+            Action:
+              - s3:ListAllMyBuckets
+            Resource: "*"
+          - Sid: ProjectBucketSettings
             Effect: Allow
             Action:
               - s3:GetBucketLocation
@@ -87,7 +129,21 @@ Resources:
               - s3:GetEncryptionConfiguration
               - s3:GetBucketPublicAccessBlock
             Resource: !Sub arn:${AWS::Partition}:s3:::velmakina-*
-          - Sid: ProjectRolesAndPolicies          # read our own IAM documents only
+  ViewIamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: velmakina-view-iam
+      Description: See role and policy names; documents of our roles and policies only.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListIam
+            Effect: Allow
+            Action:
+              - iam:ListRoles                     # names only
+              - iam:ListPolicies
+            Resource: "*"
+          - Sid: ProjectRolesAndPolicies
             Effect: Allow
             Action:
               - iam:GetRole
@@ -98,10 +154,9 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/velmakina-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/velmakina-*
-
-  # Policy 2: explicit Deny on reading stored data and secrets. Kept separate so the view
-  # policy can be reused without breaking a principal that legitimately reads data.
-  # An explicit Deny wins over any Allow, including the wildcards above (ADR-0006).
+  # Deny policy: explicit Deny on reading stored data and secrets. Kept separate so the
+  # view policies can be reused without breaking a principal that legitimately reads data.
+  # An explicit Deny wins over any Allow, now or attached later (ADR-0006).
   DenyDataPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -138,7 +193,7 @@ Resources:
               - autoscaling:DescribeLaunchConfigurations  # returns user data too
             Resource: "*"
 
-  # The role: both policies attached; assumable only by the one trusted principal, with MFA.
+  # The role: all view policies + the Deny; assumable only by the one trusted principal, with MFA.
   ReadOnlyRole:
     Type: AWS::IAM::Role
     Properties:
@@ -158,7 +213,12 @@ Resources:
               NumericLessThanEquals:
                 aws:MultiFactorAuthAge: 3600   # MFA used within the last hour
       ManagedPolicyArns:
-        - !Ref ViewPolicy                      # Ref on a managed policy returns its ARN
+        - !Ref ViewNetworkPolicy               # Ref on a managed policy returns its ARN
+        - !Ref ViewComputePolicy
+        - !Ref ViewStacksPolicy
+        - !Ref ViewMonitoringPolicy
+        - !Ref ViewS3Policy
+        - !Ref ViewIamPolicy
         - !Ref DenyDataPolicy
 
 Outputs:
