@@ -1,0 +1,44 @@
+# Local cluster: the same image as on EC2, one coordinator and two shards.
+#   docker compose up --build -d      then   scripts/smoke.sh http://localhost:8080
+services:
+  coordinator:
+    build: .
+    image: capstone-kv:local
+    environment:
+      KV_ROLE: coordinator
+      KV_EXPECTED_SHARDS: "2"
+    ports:
+      - "8080:8080"            # the only node reachable from the host, as in AWS
+    volumes:
+      - coordinator-data:/data
+    restart: always
+
+  shard-1:
+    image: capstone-kv:local
+    depends_on: [coordinator]
+    environment:
+      KV_ROLE: shard
+      KV_SHARD_ID: shard-1                       # stable ID: decides ring positions
+      KV_COORDINATOR_URL: http://coordinator:8080
+      KV_ADVERTISE_URL: http://shard-1:8080      # how the coordinator reaches this shard
+    volumes:
+      - shard-1-data:/data
+    restart: always
+
+  shard-2:
+    image: capstone-kv:local
+    depends_on: [coordinator]
+    environment:
+      KV_ROLE: shard
+      KV_SHARD_ID: shard-2
+      KV_COORDINATOR_URL: http://coordinator:8080
+      KV_ADVERTISE_URL: http://shard-2:8080
+    volumes:
+      - shard-2-data:/data
+    restart: always
+
+# Named volumes keep data across `docker compose restart` and container re-creation.
+volumes:
+  coordinator-data:
+  shard-1-data:
+  shard-2-data:

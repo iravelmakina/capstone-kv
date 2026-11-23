@@ -1,0 +1,247 @@
+openapi: 3.1.0
+info:
+  title: capstone-kv
+  version: "1.0"
+  description: >-
+    Public API of the capstone-kv coordinator (ADR-0010). Register a table, then put,
+    read, check and delete its items. Internal shard endpoints (/internal/v1/...) are
+    not part of this contract.
+
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /health:
+    get:
+      summary: Node is up and can serve requests
+      operationId: health
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/tables:
+    post:
+      summary: Register a table
+      operationId: createTable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TableDefinition" }
+      responses:
+        "201":
+          description: Table registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TableDefinition" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: A table with this name already exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      summary: List tables
+      operationId: listTables
+      responses:
+        "200":
+          description: All registered tables
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TableDefinition" }
+
+  /v1/tables/{table}:
+    parameters:
+      - $ref: "#/components/parameters/Table"
+    get:
+      summary: Read a table definition
+      operationId: getTable
+      responses:
+        "200":
+          description: The table definition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TableDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # Tables without a sort key: the item is addressed by its partition key alone.
+  /v1/tables/{table}/items/{pk}:
+    $ref: "#/components/pathItems/ItemByPartitionKey"
+
+  # Tables with a sort key: the item is addressed by partition key + sort key.
+  /v1/tables/{table}/items/{pk}/{sk}:
+    $ref: "#/components/pathItems/ItemByFullKey"
+
+components:
+  parameters:
+    Table:
+      name: table
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Name" }
+    PartitionKey:
+      name: pk
+      in: path
+      required: true
+      description: Partition key value. Decides the shard (ADR-0012).
+      schema: { type: string, minLength: 1, maxLength: 1024 }
+    SortKey:
+      name: sk
+      in: path
+      required: true
+      description: Sort key value. Distinguishes items inside one partition; not hashed.
+      schema: { type: string, minLength: 1, maxLength: 1024 }
+
+  pathItems:
+    ItemByPartitionKey:
+      parameters:
+        - $ref: "#/components/parameters/Table"
+        - $ref: "#/components/parameters/PartitionKey"
+      put:
+        summary: CREATE — put an item (creates or replaces; idempotent)
+        operationId: putItem
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        responses:
+          "200": { description: Stored }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+      get:
+        summary: READ — get an item
+        operationId: getItem
+        responses:
+          "200":
+            description: The item
+            content:
+              application/json:
+                schema: { $ref: "#/components/schemas/Item" }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+      head:
+        summary: EXISTS — check whether an item is present (no body)
+        operationId: itemExists
+        responses:
+          "200": { description: Present }
+          "400": { description: Wrong key shape for this table }
+          "404": { description: Absent, or the table doesn't exist }
+          "503": { description: The owning shard is unavailable }
+      delete:
+        summary: DELETE — remove an item
+        operationId: deleteItem
+        responses:
+          "204": { description: Deleted }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+    ItemByFullKey:
+      parameters:
+        - $ref: "#/components/parameters/Table"
+        - $ref: "#/components/parameters/PartitionKey"
+        - $ref: "#/components/parameters/SortKey"
+      put:
+        summary: CREATE — put an item (creates or replaces; idempotent)
+        operationId: putItemWithSortKey
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        responses:
+          "200": { description: Stored }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+      get:
+        summary: READ — get an item
+        operationId: getItemWithSortKey
+        responses:
+          "200":
+            description: The item
+            content:
+              application/json:
+                schema: { $ref: "#/components/schemas/Item" }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+      head:
+        summary: EXISTS — check whether an item is present (no body)
+        operationId: itemExistsWithSortKey
+        responses:
+          "200": { description: Present }
+          "400": { description: Wrong key shape for this table }
+          "404": { description: Absent, or the table doesn't exist }
+          "503": { description: The owning shard is unavailable }
+      delete:
+        summary: DELETE — remove an item
+        operationId: deleteItemWithSortKey
+        responses:
+          "204": { description: Deleted }
+          "400": { $ref: "#/components/responses/BadRequest" }
+          "404": { $ref: "#/components/responses/NotFound" }
+          "503": { $ref: "#/components/responses/Unavailable" }
+
+  responses:
+    BadRequest:
+      description: Invalid input, e.g. a missing sort key on a table that has one
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The table or the item doesn't exist
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: >-
+        The shard that owns this key is unavailable, or the coordinator is still waiting
+        for shards to register (ADR-0013). Retry later.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Name:
+      type: string
+      pattern: "^[A-Za-z0-9_.-]{1,128}$"
+    TableDefinition:
+      type: object
+      required: [name, partitionKey]
+      additionalProperties: false
+      properties:
+        name: { $ref: "#/components/schemas/Name" }
+        partitionKey:
+          description: Name of the partition key attribute
+          $ref: "#/components/schemas/Name"
+        sortKey:
+          description: Name of the sort key attribute; omit for a partition-key-only table
+          $ref: "#/components/schemas/Name"
+      examples:
+        - { name: users, partitionKey: userId }
+        - { name: orders, partitionKey: customerId, sortKey: orderId }
+    Item:
+      description: The stored value, any JSON object
+      type: object
+      additionalProperties: true
+      examples:
+        - { name: Ira, city: Kyiv }
+    Health:
+      type: object
+      required: [status, role]
+      properties:
+        status: { type: string, enum: [ok] }
+        role: { type: string, enum: [coordinator, shard] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

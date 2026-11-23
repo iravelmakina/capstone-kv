@@ -1,0 +1,50 @@
+Local cluster in Docker: coordinator + shard-1 + shard-2 from one image (docker-compose.yml).
+2026-11-24, Docker Desktop 28.4, image capstone-kv:local (8.4 MB).
+
+===== [L1] first start: permission bug found and fixed =====
+$ make local-up
+coordinator-1  | open table registry: mkdir /data/tables: permission denied
+shard-1-1      | open store: mkdir /data/shard: permission denied
+# Cause: the container runs as non-root (distroless "nonroot", UID 65532) but the /data
+# volume was created owned by root. Fix in the Dockerfile: copy an empty /data owned by
+# nonroot into the image; a new named volume inherits that ownership.
+
+===== [L2] after the fix: cluster ready =====
+$ curl -s localhost:8080/health
+{"ready":true,"role":"coordinator","shards":2,"status":"ok"}
+$ curl -s localhost:8080/internal/v1/shards
+[{"id":"shard-1","address":"http://shard-1:8080","available":true,"silentFor":"0s"},{"id":"shard-2","address":"http://shard-2:8080","available":true,"silentFor":"0s"}]
+
+===== [L3] smoke test =====
+$ make smoke
+ok   create table (201)
+ok   CREATE (200)
+ok   READ (200)
+ok   READ returns value ({"hello":"world"})
+ok   EXISTS (200)
+ok   DELETE (204)
+ok   READ after delete (404)
+ok   EXISTS after delete (404)
+smoke test passed against http://localhost:8080
+
+# For L4-L6: 20 items k1..k20 put into table "smoke", then read back after each event.
+
+===== [L4] shard container restarted: data replayed from its log =====
+$ docker compose restart shard-1
+shard-1-1  | shard shard-1: 15 keys replayed, registering with http://coordinator:8080 as http://shard-1:8080
+read k1..k20 -> 200: 20/20, 503: 0
+
+===== [L5] shard stopped: its keys answer 503, the rest still work; back after restart =====
+$ docker compose stop shard-2 ; sleep 17      (3 missed heartbeats = 15 s)
+read k1..k20 -> 200: 15/20, 503: 5
+$ curl -s localhost:8080/internal/v1/shards
+[{"id":"shard-1","address":"http://shard-1:8080","available":true,"silentFor":"1s"},{"id":"shard-2","address":"http://shard-2:8080","available":false,"silentFor":"21s"}]
+$ docker compose start shard-2 ; sleep 3
+read k1..k20 -> 200: 20/20, 503: 0
+
+===== [L6] coordinator restarted: 503 until shards re-register, tables and data intact =====
+$ docker compose restart coordinator
+right after restart: GET k1 -> 503
+$ sleep 6 ; curl -s localhost:8080/v1/tables
+[{"name":"smoke","partitionKey":"id"}]
+read k1..k20 -> 200: 20/20, 503: 0

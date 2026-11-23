@@ -11,10 +11,10 @@ TEMPLATE := infra/network.yaml
 AWS      := aws --profile $(PROFILE) --region $(REGION)
 CFN      := $(AWS) cloudformation
 
-.PHONY: help whoami lint diff up down drift verify rebuild
+.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down smoke
 
 help:            ## list targets
-	@grep -E '^[a-z]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
+	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
 
 whoami:          ## which AWS identity is active
 	@$(AWS) sts get-caller-identity --query Arn --output text
@@ -85,3 +85,18 @@ rebuild:         ## timed teardown + rebuild (for docs/m1/recreate-log.md)
 	CONFIRM=yes $(MAKE) --no-print-directory up; \
 	end=$$(date +%s); \
 	echo "teardown: $$((mid-start))s  rebuild: $$((end-mid))s  total: $$((end-start))s"
+
+# --- M2: the Go app, locally -------------------------------------------------------------
+
+test:            ## go vet + all Go tests (incl. contract test and ring distribution)
+	go vet ./... && go test ./...
+
+local-up:        ## build the image and start coordinator + 2 shards in Docker
+	docker compose up --build -d
+
+local-down:      ## stop the local cluster (add -v to docker compose down to wipe data)
+	docker compose down
+
+smoke:           ## the four operations against a running coordinator (BASE=http://...)
+	scripts/smoke.sh $(or $(BASE),http://localhost:8080)
+

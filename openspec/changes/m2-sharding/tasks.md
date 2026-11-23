@@ -12,26 +12,26 @@
 
 ## 2. API and ring
 
-- [ ] 2.1 Write `api/openapi.yaml` per ADR-0010
-- [ ] 2.2 `internal/ring`: xxHash64 ring with virtual nodes and stable shard IDs; unit tests for lookup, join and restart
-- [ ] 2.3 Distribution test (1, 16, 64, 128, 256 virtual nodes × 2, 3, 5 shards); results in `docs/m2/ring-distribution.md`; confirm or adjust the count per ADR-0011's acceptance rule
+- [x] 2.1 Write `api/openapi.yaml` per ADR-0010
+- [x] 2.2 `internal/ring`: xxHash64 ring with virtual nodes and stable shard IDs; unit tests for lookup, join and restart
+- [x] 2.3 Distribution test (1, 16, 64, 128, 256 virtual nodes × 2, 3, 5 shards); results in `docs/m2/ring-distribution.md`; confirm or adjust the count per ADR-0011's acceptance rule
 
 ## 3. Shard
 
-- [ ] 3.1 `internal/store`: in-memory map + append-only log (length + checksum per record, fsync), replay at start; tests incl. a torn last record
-- [ ] 3.2 `internal/shard`: internal key-value endpoints, `/health`, registration + heartbeat loop
+- [x] 3.1 `internal/store`: in-memory map + append-only log (length + checksum per record, fsync), replay at start; tests incl. a torn last record
+- [x] 3.2 `internal/shard`: internal key-value endpoints, `/health`, registration + heartbeat loop
 
 ## 4. Coordinator
 
-- [ ] 4.1 Table registry (persisted like the store); `POST /v1/tables`
-- [ ] 4.2 Item endpoints: route by table + partition key, forward to the shard; 400/404/409/503 per the spec
-- [ ] 4.3 Membership: register, heartbeat, unavailable after 3 misses, explicit removal, 503 until the expected shard count is present
-- [ ] 4.4 Contract test against `api/openapi.yaml`
+- [x] 4.1 Table registry (persisted like the store); `POST /v1/tables`
+- [x] 4.2 Item endpoints: route by table + partition key, forward to the shard; 400/404/409/503 per the spec
+- [x] 4.3 Membership: register, heartbeat, unavailable after 3 misses, explicit removal, 503 until the expected shard count is present
+- [x] 4.4 Contract test against `api/openapi.yaml`
 
 ## 5. Local run
 
-- [ ] 5.1 `Dockerfile` (static Go build, minimal image); `docker-compose.yml` with a coordinator and 2 shards
-- [ ] 5.2 End-to-end test on compose: create table, put, read, exists, delete; restart a shard and read back
+- [x] 5.1 `Dockerfile` (static Go build, minimal image); `docker-compose.yml` with a coordinator and 2 shards
+- [x] 5.2 End-to-end test on compose: create table, put, read, exists, delete; restart a shard and read back
 
 ## 6. Infrastructure
 
