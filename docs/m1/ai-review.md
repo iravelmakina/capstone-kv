@@ -149,32 +149,41 @@ Proposed by the drafting session; agreed by the author in chat on 2026-11-05.
 | # | AI point | Verdict | Argument | Change made |
 | --- | --- | --- | --- | --- |
 | 1 | W1 + §2: the private tier can't install or operate anything; use a NAT Gateway that's off by default | **Accept** | Right: interface endpoints for CloudWatch are useless when the instance role can't call CloudWatch, and nothing explained how YCSB, Prometheus or runtime packages reach the nodes. A switchable NAT costs $0 idle and ~$0.05/h only during installs | ADR-0005: CloudWatch endpoints and the DynamoDB endpoint dropped; M1 keeps no route out (nothing runs yet); the switchable NAT is the planned M2 path, decided in M2's ADR |
-| 2 | §2: use AWS `ViewOnlyAccess` as the base of the read-only policy | **Refute** | The task says to *create* the policy, and every action in it must be explainable at the defense. A managed policy that AWS changes over time would silently widen an auditor's access, which is the opposite of least privilege. Its real concern, gaps in a hand-made list, is fixed differently: a separate Deny policy and a test against an explicit list of data actions | ADR-0006 keeps our own policy, moves the Deny into a second policy, extends the Deny list, tightens trust (`Bool`, MFA age, no `:root`) |
+| 2 | §2: use AWS `ViewOnlyAccess` as the base of the read-only policy | **Refute** | The task says to *create* the policy, and every action in it must be explainable at the defense. A managed policy that AWS changes over time would silently widen an auditor's access, which is the opposite of least privilege. Its real concern, gaps in a hand-made list, is fixed differently: a separate Deny policy and a test against an explicit list of data actions | ADR-0006 keeps our own policy, moves the Deny into a second policy, extends the Deny list, tightens trust (`Bool`, MFA age, no `:root`). Later ADR-0007 names every view action (no wildcards) and ADR-0008 groups them by service |
 | 3 | §2: "lower latency from Kyiv" is irrelevant to the region choice | **Refute** | Some clients do run from Kyiv: the M4 MCP client (an AI assistant on my laptop), the M5 ops agent, and my interactive testing. Benchmarks will run in-region, but these won't | ADR-0004 now states which clients the latency matters for |
 
-**Other points accepted without debate:** W3 (one VPC-wide security group made the
-network flat → removed from M1; M2's app stack creates role groups that reference each other), W4 (list exports
-broke "additive" growth → one export per value, with AZ IDs), W5 (`standard` CPU credits
-would throttle benchmarks → stay `unlimited`, budget the surplus), the overlapping CIDR
-(→ `10.20.0.0/16`), "us-west-2 is a parameter change" (corrected), change sets shown
-before executing, a `make verify` route check, `NOT_CHECKED` in drift results, a teardown
-note for stateful resources, and ADR-0001 (lab 1) removed from this repo.
+### Every other point
 
-**Decided 2026-11-06:** the console placeholder in the dissection was replaced by a real
-console check (IAM → Roles → `voclabs`: access denied by an explicit deny, evidence 95),
-since the lecturer expects the console route. Subnets and route tables are now confirmed
-by the real deploy (evidence 80–88).
+Agreed by the author on 2026-11-05/06; the Systems Manager, artifact and instance-cap rows
+on 2026-11-23.
 
-**Decided 2026-11-06** (proposed by the drafting session, agreed by the author): §2, "ADR-0002's comparison is skewed" →
-**partly accept; the decision stands.**
-- *CDK "refused" cites no evidence* → the evidence exists: the default `cdk bootstrap`
-  creates IAM roles (deploy, file-publishing, lookup, execution), and `voclabs` gets an
-  implicit deny on `iam:CreateRole` (simulator 08, real attempt 60). True that a custom
-  bootstrap or a synthesizer using CLI credentials avoids the roles, but that's extra setup
-  to explain and still needs a staging bucket for assets, for a gain M1 doesn't need:
-  21 resources in plain YAML don't need loops or a programming language.
-- *Terraform's "half-applied state" is overstated* → fair: Terraform records what it
-  created and a re-run continues. The real cost in this sandbox is elsewhere: the state
-  file has to live and be protected somewhere (an S3 bucket we'd create and lock).
-  CloudFormation keeps state inside AWS and rolls back on its own.
-- No ADR change: both points sharpen the arguments, neither changes the choice.
+| AI point | Verdict | Resolved by |
+| --- | --- | --- |
+| W1: CloudWatch interface endpoints as runner-up; unused DynamoDB endpoint | Accept | ADR-0005: both dropped |
+| W1: Systems Manager can't work without `ssm`/`ssmmessages`/`ec2messages` endpoints or egress | Accept, deferred to M2 | M1 runs no instances. In M2 the switchable NAT gives the SSM agent a way out during work windows; the ops channel (SSM over NAT, SSM endpoints at ≈ $22/month, or Instance Connect) is decided in M2's ADR with the app stack |
+| W1: artifact supply chain undesigned (runtime packages, YCSB, Prometheus, images) | Accept, deferred to M2 | Installs go through the switchable NAT; builds go to an S3 bucket created by M2's app stack, with a bucket policy limited to our VPC (`aws:SourceVpce`). Budget already counts the bucket |
+| W1: "stops with the lab session" doesn't separate the options | Accept | Removed from ADR-0005's options table |
+| W1 related: M3 bucket-policy write grant also reaches the lab's instances | Accept | Dissection's M3 row conditions it on `aws:SourceVpc` |
+| W2: access-level test can't tell viewing from reading data | Accept | Spec scenario "Data actions denied" tests an explicit list of data actions (evidence 70, 72–73) |
+| W2: data-revealing actions slip through the wildcards | Accept | All listed actions added to `velmakina-deny-data`, plus launch-template and launch-configuration user data; ADR-0007 removed the view wildcards altogether |
+| W2: a Deny inside a reusable view policy breaks other principals | Accept | Deny moved to its own policy (ADR-0006) |
+| W2: trust under-specified (`:root`, `BoolIfExists`, principal type, session length) | Accept | `AllowedPattern` rejects `:root`, `Bool` + `MultiFactorAuthAge` ≤ 3600, IAM user with MFA as the expected caller, `MaxSessionDuration` 3600 (ADR-0006) |
+| W3: one VPC-wide security group makes the network flat | Accept | Removed from M1; M2's app stack creates role groups that reference each other |
+| W4: list exports break additive growth; no AZ mapping | Accept | One export per value, including `AzIdA/B/C` (ADR-0003) |
+| W4: SSM runner-up dismissed on an overstated claim | Accept | ADR-0003's table now says EC2 still refuses to delete a VPC with live ENIs |
+| W5: `standard` CPU credits throttle benchmarks | Accept | Stay `unlimited`, surplus in the budget, `CPUCreditBalance` recorded with every run |
+| §2: no security groups in M1 beats a CIDR-wide group | Accept | Same as W3 |
+| §2: conditional NAT never listed | Accept | ADR-0005 option 3, planned for M2 |
+| §2: CIDR overlaps the lab's Project VPC | Accept | `10.20.0.0/16` (ADR-0004) |
+| §2: "us-west-2 is a parameter change" is false | Accept | ADR-0004 now says new AZ IDs and a new t3.small check are needed |
+| §2: ADR-0002's comparison is skewed | Partly accept, decision stands | The CDK refusal is backed by the `iam:CreateRole` deny (simulator 08, attempt 60): the default `cdk bootstrap` creates IAM roles. A role-free bootstrap exists but still needs a staging bucket, for no gain in M1. Terraform's "half-applied state" was overstated (a re-run continues), but its state file still has to be stored and protected somewhere |
+| §3: budget vs credit ceiling not compared | Accept | Ceiling is $60; `budget.md` compares every scenario with it |
+| §3: lab instance limit unknown; vCPU, EIP, ENI, Instance Connect Endpoint quotas | Accept, partly open | AWS quotas listed in `quotas.md` and none binds (256 vCPUs, 5 EIPs). The Academy's own instance cap isn't visible from inside the account: M2's first 4-instance launch checks it before M3 needs 8. No Instance Connect Endpoint is planned in M1 |
+| §3: console method is a placeholder; subnets and route tables not probed | Accept | Real console check (evidence 95); the deploy confirms subnets and routes (evidence 80–88) |
+| §3: dissection is an AI draft | Accept | Reviewed by the author (task 4.2) |
+| §3: `make up` executes without showing the change set | Accept | `make up` prints the change set and waits for "yes" |
+| §3: drift can't see an added `0.0.0.0/0` route | Accept | `make verify` checks the private route tables directly |
+| §3: `NOT_CHECKED` missing from the drift statuses | Accept | Added to the infra-lifecycle spec |
+| §3: teardown of stateful resources unplanned | Accept | ADR-0003: `DeletionPolicy` for EBS and S3 from M2 |
+| §3: ADRs still `Proposed`; ADR-0001 out of scope | Accept | ADRs accepted before any code; ADR-0001 removed |
+| §3: goal "network used unchanged" contradicts later endpoints | Accept | design.md goal is now "additive updates only"; no endpoint other than S3 is planned in M1 |
