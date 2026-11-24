@@ -30,17 +30,44 @@ Every app stack, from creation to deletion (`list-stacks --stack-status-filter D
 | S3 (releases ~3.5 MB each, results) | a few MB | < $0.01 |
 | **Ours, M2 so far** | | **≈ $0.72** |
 
-**The surprise is data between AZs:** about 6.1 million baseline operations (plus 2.1 million in the check run) of ~2 KB each
-crossed from the client (AZ b) to the coordinator (AZ a), and half of them again from the
-coordinator to shard-2 (AZ b). The M1 budget assumed 5 GB ($0.10). Two fixes for later runs:
-put the benchmark client in the coordinator's AZ (also lowers latency), and remember that M3
-replicas in three AZs will make every write cross AZs by design.
+**The surprise is data between AZs:** about 6.1 million baseline operations (plus 2.1
+million in the check run) of ~2 KB each crossed from the client (AZ b) to the coordinator
+(AZ a), and half of them again from the coordinator to shard-2 (AZ b). The M1 budget assumed
+5 GB ($0.10); the bill shows 36 GB (below). Two fixes for later runs: put the benchmark
+client in the coordinator's AZ (also lowers latency), and remember that M3 replicas in three
+AZs will make every write cross AZs by design.
+
+## The actual bill (Cost Explorer, 2026-11-01 to 2026-11-24, read 2026-11-24 evening)
+
+The lab page says **Used $23.4 of $60**. Cost Explorer (`ce get-cost-and-usage`, by usage
+type) adds up to the same $23.4:
+
+| Usage type | Quantity | Cost | Whose |
+| --- | ---: | ---: | --- |
+| `NatGateway-Hours` | 459 h | $20.66 | **the lab's** NAT Gateway in "Project VPC" (the lab stack's VPC, not ours) |
+| `PublicIPv4:InUseAddress` | 461.9 h | $2.31 | ~459 h the lab NAT's address, ~3 h ours |
+| `DataTransfer-Regional-Bytes` | 36.1 GB | $0.36 | ours: benchmark traffic between AZs ($0.01/GB) |
+| `BoxUsage:t3.small` | 1.2 h | $0.02 | ours |
+| `APIRequest` | 1 | $0.01 | ours |
+| **Total** | | **≈ $23.4** | ours ≈ $0.40, the lab's ≈ $23.0 |
+
+- **98% of the spend is the lab's NAT Gateway and its address** (≈ $1.20 a day, M1 evidence
+  94). It isn't ours and, under the project rules, we don't touch it.
+- **Stopping the lab doesn't stop it.** The NAT Gateway was created 2026-11-05 10:44 UTC
+  and Cost Explorer bills it **24 hours every day** since (14 h on the 5th), including the
+  days the lab was stopped. Ending a lab session stops EC2 instances; a NAT Gateway has no
+  "stopped" state, it runs until deleted.
+- **Our real cost is ≈ $0.40**, below the estimate above: data between AZs was billed at
+  $0.01/GB, not $0.02, and Cost Explorer lists only 1.2 t3.small hours against the 8.9 the
+  CloudFormation history shows. I can't explain that gap (it may still be catching up);
+  either way the instances cost under $0.20.
+- **Budget risk:** $36.6 is left. At $1.20 a day the lab NAT alone uses it up in about 30
+  days, around 2026-12-24, before M3–M5 are done. Ours is small next to it. Whether the NAT
+  may be stopped is a question for the lecturer, not something we change.
 
 ## Against the budget
 
-- **Ours:** ≈ $0.72 for all of M2's AWS work, against ≈ $9.82 planned for a month of lab use.
-  Instances were up only while needed (`make down-app` after every session).
-- **The lab's NAT Gateway** costs more than all of this every day it runs (≈ $1.20/day,
-  M1 evidence 94); it isn't ours and we don't delete it.
-- **To confirm:** Cost Explorer shows the real figures by service about a day later; the
-  lab page shows the total used of the $60.
+- **Ours:** ≈ $0.40 billed (≈ $0.72 estimated) for all of M2's AWS work, against ≈ $9.82
+  planned for a month of lab use. Instances were up only while needed (`make down-app`
+  after every session).
+- **The lab's:** ≈ $23.0 so far, nearly all of the $23.4 used.

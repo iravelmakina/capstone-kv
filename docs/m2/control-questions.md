@@ -1,7 +1,8 @@
 # M2 control questions — short answers
 
-> **Draft** — drafted with Claude Code as defense prep; author to rewrite in own words.
-> Each answer points to where this project shows it. Questions 9–12 are the ones the
+> **Drafted with Claude Code** as defense prep. The author answers these orally at the
+> defense; this file is notes, not the author's own text. Each answer points to where this
+> project shows it. Questions 9–12 are the ones the
 > lecturer asked in the 20.11 defenses beyond the brief's list.
 
 ## 1. Types of scalability, and when to use which
