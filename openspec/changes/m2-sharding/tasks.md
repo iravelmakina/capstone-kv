@@ -50,7 +50,7 @@
 ## 8. Benchmark
 
 - [x] 8.1 `bench/`: go-ycsb binding for our API
-- [ ] 8.2 Workloads A and B, 3 runs each, per ADR-0016; results in `docs/m2/benchmark.md`, raw output in S3
+- [x] 8.2 Workloads A and B, 3 runs each, per ADR-0016; results in `docs/m2/benchmark.md`, raw output in S3
 
 ## 9. Review and docs
 

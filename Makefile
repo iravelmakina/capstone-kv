@@ -181,8 +181,10 @@ smoke-aws:       ## smoke test on the coordinator via SSM (works from CI and lap
 
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,
-# runs bench.sh on the client through SSM and waits (polling: a full run takes ~30-40 min,
-# longer than the CLI's built-in waiter), then downloads the results to bench-results/.
+# runs bench.sh on the client through SSM and waits (polling: a full run takes ~40 min,
+# longer than the CLI's built-in waiter). The client can't write to S3 (instance role, M1
+# evidence 63), so the summaries come back in the SSM output; this target saves them to
+# bench-results/<sha>/<time>.txt and uploads that file to S3 with its own credentials.
 RUNS ?= 3
 
 bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=true)
@@ -207,11 +209,12 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	  status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null || echo Pending); \
 	  case $$status in Pending|InProgress|Delayed) sleep 30;; *) break;; esac; \
 	done; \
-	$(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query StandardOutputContent --output text; \
-	echo "SSM status: $$status ($$(date -u +%T) UTC)"; \
-	mkdir -p bench-results; \
-	$(AWS) s3 cp --recursive s3://$(BUCKET)/bench-results/$(VERSION)/ bench-results/$(VERSION)/ --quiet; \
-	echo "results downloaded to bench-results/$(VERSION)/"; \
+	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ).txt; mkdir -p bench-results/$(VERSION); \
+	{ echo "release $(VERSION), client $$client -> $$url, runs per workload: $(RUNS), SSM status: $$status"; \
+	  $(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query StandardOutputContent --output text; } > $$result; \
+	cat $$result; \
+	$(AWS) s3 cp $$result s3://$(BUCKET)/$$result --quiet; \
+	echo "saved to $$result and s3://$(BUCKET)/$$result"; \
 	[ "$$status" = Success ]
 
 app-url:         ## print the coordinator URL of the running app stack

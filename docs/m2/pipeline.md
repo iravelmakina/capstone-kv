@@ -89,6 +89,23 @@ in S3 (ADR-0015, the lecturer's advice from the 02.11 defenses).
 
 The app stack was deleted with `make down-app`; the network and artifacts stacks stay.
 
+### 6. Benchmark workflow: first attempt failed — 2026-11-24, 11:03–11:08 UTC
+
+Before it, the ci-cd run for `30e1846` had failed twice at the AWS login (lab credentials in
+the secrets had expired overnight); after a new lab session and fresh secrets, the rerun
+([run 45378620997](https://github.com/iravelmakina/capstone-kv/actions/runs/45378620997),
+attempt 3) was green.
+
+[Run 45380561150](https://github.com/iravelmakina/capstone-kv/actions/runs/45380561150)
+(`benchmark.yml`): release found, app stack with the client deployed, then the benchmark step
+failed 2 minutes into the load; the stack was still deleted (`if: always()`).
+
+**Cause:** `bench.sh` uploaded each result to S3 from the client, but the instance role can
+read S3 and not write it (M1 evidence 63); with `set -e` the script stopped at the first
+upload. **Fix:** the client prints only the final summaries into the SSM output, and
+`make bench-aws` stores them and uploads them with its own credentials. The baseline was
+then run from a laptop with the same targets: `docs/m2/benchmark.md`.
+
 ## Notes
 
 - **Every commit on `main` is a release**, including a template-only or docs-only one, so
