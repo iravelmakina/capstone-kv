@@ -45,11 +45,11 @@
 - [x] 7.1 Author adds the three lab-credential secrets to the repo
 - [ ] 7.2 `.github/workflows/ci-cd.yml`: test → build → deploy-infra → deploy-app → smoke
 - [x] 7.3 A push to `main` deploys a code change; a template change shows its change set; a rollback to an earlier SHA works; links to the runs in `docs/m2/pipeline.md`
-- [ ] 7.4 `.github/workflows/benchmark.yml` (manual)
+- [x] 7.4 `.github/workflows/benchmark.yml` (manual)
 
 ## 8. Benchmark
 
-- [ ] 8.1 `bench/`: go-ycsb binding for our API
+- [x] 8.1 `bench/`: go-ycsb binding for our API
 - [ ] 8.2 Workloads A and B, 3 runs each, per ADR-0016; results in `docs/m2/benchmark.md`, raw output in S3
 
 ## 9. Review and docs

@@ -48,6 +48,9 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: go test (incl. contract test against api/openapi.yaml)
         run: go test -race ./...
+      - name: benchmark client builds (bench/ is its own Go module)
+        working-directory: bench
+        run: go vet ./... && go build ./...
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

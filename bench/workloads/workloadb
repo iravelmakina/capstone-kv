@@ -1,0 +1,8 @@
+# Workload B, "read mostly": 95% reads, 5% updates, zipfian. Typical: photo tagging or
+# user profiles, read far more than written. Same proportions as YCSB's workloadb.
+operationcount=1000000
+readproportion=0.95
+updateproportion=0.05
+scanproportion=0
+insertproportion=0
+requestdistribution=zipfian

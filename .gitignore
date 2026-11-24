@@ -18,3 +18,7 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# Benchmark outputs downloaded by make bench-aws (summaries go into docs/m2/benchmark.md)
+bench-results/
+.kvbench-linux

@@ -1,0 +1,9 @@
+# Workload A, "update heavy": 50% reads, 50% updates, keys drawn from a zipfian
+# distribution (a few hot keys get most requests). Typical: a session store recording
+# recent actions. Same proportions as YCSB's workloada.
+operationcount=1000000
+readproportion=0.5
+updateproportion=0.5
+scanproportion=0
+insertproportion=0
+requestdistribution=zipfian

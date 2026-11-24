@@ -1,0 +1,21 @@
+# Settings shared by every capstone-kv benchmark run (ADR-0016). Loaded before the
+# workload file:  kvbench load|run -P workloads/common -P workloads/workloada ...
+
+workload=core
+table=usertable
+
+# Data: YCSB defaults, 10 fields x 100 bytes = ~1 KB per record.
+recordcount=100000
+fieldcount=10
+fieldlength=100
+
+# Our PUT replaces the whole item (ADR-0010), so an update must send the whole record:
+# with the default (false) YCSB would send one field and the item would shrink to it.
+writeallfields=true
+readallfields=true
+
+# Client threads; go-ycsb's own default is 200. Kept fixed so runs are comparable.
+threadcount=16
+
+# Keys inserted in hashed order (YCSB default), so load spreads over the ring from the start.
+insertorder=hashed

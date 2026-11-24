@@ -24,7 +24,7 @@ VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
 .PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down smoke \
-        up-artifacts release up-app down-app app-url smoke-aws
+        up-artifacts release up-app down-app app-url smoke-aws bench-aws
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
@@ -145,11 +145,13 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
-up-app:          ## deploy the app stack running VERSION (default: current commit)
+BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
+
+up-app:          ## deploy the app stack running VERSION (BENCH=true adds the client)
 	@$(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null || \
 	  { echo "release $(VERSION) not in S3: run make release"; exit 1; }
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR)"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH))"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
@@ -176,6 +178,41 @@ smoke-aws:       ## smoke test on the coordinator via SSM (works from CI and lap
 	$(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query StandardOutputContent --output text; \
 	status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query Status --output text); \
 	echo "SSM status: $$status"; [ "$$status" = Success ]
+
+# bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
+# uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,
+# runs bench.sh on the client through SSM and waits (polling: a full run takes ~30-40 min,
+# longer than the CLI's built-in waiter), then downloads the results to bench-results/.
+RUNS ?= 3
+
+bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=true)
+	@set -euo pipefail; \
+	out() { $(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='$$1'].OutputValue" --output text; }; \
+	client=$$(out BenchmarkClientInstanceId); url=$$(out CoordinatorPrivateUrl); \
+	case "$$client" in i-*) ;; *) echo "no benchmark client: run make up-app BENCH=true"; exit 1;; esac; \
+	(cd bench && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../.kvbench-linux .); \
+	$(AWS) s3 cp .kvbench-linux s3://$(BUCKET)/bench/$(VERSION)/kvbench --quiet; \
+	$(AWS) s3 cp --recursive bench/workloads s3://$(BUCKET)/bench/$(VERSION)/workloads --quiet; \
+	$(AWS) s3 cp scripts/bench.sh s3://$(BUCKET)/bench/$(VERSION)/bench.sh --quiet; \
+	echo "client $$client -> $$url, $(RUNS) runs per workload: waiting for the SSM agent"; \
+	for i in $$(seq 30); do \
+	  [ "$$($(AWS) ssm describe-instance-information --filters Key=InstanceIds,Values=$$client --query 'InstanceInformationList[0].PingStatus' --output text)" = Online ] && break; \
+	  sleep 10; done; \
+	cmd=$$($(AWS) ssm send-command --instance-ids $$client --document-name AWS-RunShellScript \
+	  --comment "capstone-kv benchmark $(VERSION)" --timeout-seconds 600 \
+	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS)\"]" \
+	  --query Command.CommandId --output text); \
+	echo "SSM command $$cmd started $$(date -u +%T) UTC; polling every 30 s"; \
+	while :; do \
+	  status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null || echo Pending); \
+	  case $$status in Pending|InProgress|Delayed) sleep 30;; *) break;; esac; \
+	done; \
+	$(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query StandardOutputContent --output text; \
+	echo "SSM status: $$status ($$(date -u +%T) UTC)"; \
+	mkdir -p bench-results; \
+	$(AWS) s3 cp --recursive s3://$(BUCKET)/bench-results/$(VERSION)/ bench-results/$(VERSION)/ --quiet; \
+	echo "results downloaded to bench-results/$(VERSION)/"; \
+	[ "$$status" = Success ]
 
 app-url:         ## print the coordinator URL of the running app stack
 	@$(CFN) describe-stacks --stack-name $(APP_STACK) \

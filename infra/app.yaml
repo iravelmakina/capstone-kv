@@ -27,6 +27,14 @@ Parameters:
     # Latest Amazon Linux 2023 AMI, looked up at deploy time from AWS's public parameter.
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  BenchmarkClient:
+    Type: String
+    Description: "true while benchmarking: adds the YCSB client instance (ADR-0016)"
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  WithBenchmarkClient: !Equals [!Ref BenchmarkClient, "true"]
 
 Resources:
   # --- Security groups ------------------------------------------------------------------
@@ -184,6 +192,37 @@ Resources:
       Tags:
         - { Key: Name, Value: velmakina-kv-shard-2 }
 
+  # --- Benchmark client (only while benchmarking) ----------------------------------------
+  # Runs go-ycsb inside the VPC, so the numbers measure the store, not the internet. No
+  # inbound ports: it's driven through SSM. Public subnet B (a different AZ from the
+  # coordinator), with a public IP only so its SSM agent can reach AWS.
+  ClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: WithBenchmarkClient
+    Properties:
+      GroupDescription: capstone-kv benchmark client - no inbound traffic
+      VpcId: !ImportValue
+        Fn::Sub: ${NetworkStack}-VpcId
+      Tags:
+        - { Key: Name, Value: velmakina-kv-client-sg }
+
+  BenchmarkClientInstance:
+    Type: AWS::EC2::Instance
+    Condition: WithBenchmarkClient
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: Inventory-App-Role     # reads the bench files from S3
+      CreditSpecification: { CPUCredits: unlimited }
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !ImportValue
+            Fn::Sub: ${NetworkStack}-PublicSubnetB
+          AssociatePublicIpAddress: true
+          GroupSet: [!Ref ClientSecurityGroup]
+      Tags:
+        - { Key: Name, Value: velmakina-kv-bench-client }
+
 Outputs:
   CoordinatorInstanceId:
     Description: For SSM commands (smoke test, logs)
@@ -196,3 +235,9 @@ Outputs:
   AppVersion:
     Description: The release this stack runs
     Value: !Ref AppVersion
+  CoordinatorPrivateUrl:
+    Description: How the benchmark client (inside the VPC) reaches the coordinator
+    Value: !Sub http://${Coordinator.PrivateIp}:8080
+  BenchmarkClientInstanceId:
+    Condition: WithBenchmarkClient
+    Value: !Ref BenchmarkClientInstance

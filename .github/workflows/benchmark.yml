@@ -1,0 +1,64 @@
+# YCSB benchmark (ADR-0016), started by hand: kept apart from ci-cd.yml so tests and deploys
+# never wait for a 30-40 minute benchmark (the lecturer's advice in the 20.11 defenses).
+#
+# Runs on main's current commit: makes sure its release exists, deploys the app stack with
+# the benchmark client, runs workloads A and B on the client through SSM, keeps the raw
+# outputs (S3 and a workflow artifact), and by default deletes the app stack afterwards.
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Runs per workload (the median of 3 is the baseline)"
+        default: "3"
+      teardown:
+        description: "Delete the app stack when done (it costs ~$0.09/h with the client)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-refs/heads/main     # never at the same time as a deploy from ci-cd.yml
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PROFILE: ""
+  CONFIRM: "yes"
+
+jobs:
+  benchmark:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bench/go.mod
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # The lab keys expire with the session (3 h); a full benchmark takes ~40 min of it.
+      - name: release of this commit (built only if missing)
+        run: make release
+      - name: app stack with the benchmark client
+        run: make up-app BENCH=true CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR || '10.20.0.0/16' }}"
+      - name: workloads A and B on the client
+        run: make bench-aws RUNS=${{ inputs.runs }}
+      - name: keep the raw outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results/
+          if-no-files-found: warn
+      - name: delete the app stack
+        if: always() && inputs.teardown
+        run: make down-app
