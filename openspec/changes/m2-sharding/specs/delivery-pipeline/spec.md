@@ -28,6 +28,14 @@ smoke test; every stack update SHALL go through a change set.
 - **WHEN** a commit on `main` changes only Go code
 - **THEN** the app stack is updated with the new SHA and the smoke test passes
 
+#### Scenario: Failed change set fails the job
+- **WHEN** creating a change set fails for any reason other than "no changes"
+- **THEN** the deploy job fails
+
+#### Scenario: Smoke test checks the intended version
+- **WHEN** the smoke test runs after a deploy
+- **THEN** it compares the version each node reports with the version the pipeline meant to deploy, not with the stack's own output
+
 #### Scenario: Rollback
 - **WHEN** the deploy job is re-run with an earlier SHA
 - **THEN** the app stack runs that version

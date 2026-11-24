@@ -43,7 +43,7 @@
 ## 7. CI/CD
 
 - [x] 7.1 Author adds the three lab-credential secrets to the repo
-- [ ] 7.2 `.github/workflows/ci-cd.yml`: test → build → deploy-infra → deploy-app → smoke
+- [x] 7.2 `.github/workflows/ci-cd.yml`: test → build → deploy-infra → deploy-app → smoke
 - [x] 7.3 A push to `main` deploys a code change; a template change shows its change set; a rollback to an earlier SHA works; links to the runs in `docs/m2/pipeline.md`
 - [x] 7.4 `.github/workflows/benchmark.yml` (manual)
 
@@ -54,8 +54,19 @@
 
 ## 9. Review and docs
 
-- [ ] 9.1 AI design review from a fresh session; transcript and verdicts in `docs/m2/ai-review.md`
-- [ ] 9.2 `docs/m2/control-questions.md` (incl. virtual nodes on node failure, load balancing and service discovery, p95 vs p99)
-- [ ] 9.3 README: bring up, verify, what changed since M1
-- [ ] 9.4 Actual spend for the M2 sessions vs the M1 budget
+- [x] 9.1 AI design review from a fresh session; transcript and verdicts in `docs/m2/ai-review.md`
+- [x] 9.2 `docs/m2/control-questions.md` (incl. virtual nodes on node failure, load balancing and service discovery, p95 vs p99)
+- [x] 9.3 README: bring up, verify, what changed since M1
+- [x] 9.4 Actual spend for the M2 sessions vs the M1 budget
 - [ ] 9.5 `AGENT_WORKLOG.md` row for every agent-made file
+
+## 10. Fixes from the AI design review (`docs/m2/ai-review.md`, verdicts agreed)
+
+- [ ] 10.1 `make diff`: only "no changes" counts as success; `smoke-aws` checks the version the job meant to deploy (CI passes it)
+- [ ] 10.2 ADR-0017: `ImageId` is a concrete AMI ID, looked up once on create and kept on update
+- [ ] 10.3 ADR-0018: store cuts the log back after a failed write; damage in the middle of the log stops the shard; tests
+- [ ] 10.4 Coordinator `/health` answers 503 until ready; OpenAPI and tests updated
+- [ ] 10.5 `ExpectedShards` parameter in `infra/app.yaml` (ADR-0014)
+- [ ] 10.6 `api/internal-openapi.yaml`: shard registration and the shards' key-value endpoints
+- [ ] 10.7 Wording: coordinator not stateless, single lock across `fsync`, ring key description, "for good" comment
+- [ ] 10.8 A green run of the benchmark workflow after the fixes

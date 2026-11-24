@@ -37,6 +37,10 @@ through the S3 gateway endpoint and run it as a container that restarts on failu
 - **WHEN** the app stack is updated with a different `AppVersion`
 - **THEN** every node runs that image, and the stack's parameters show which version runs
 
+#### Scenario: Routine deploy keeps the instances
+- **WHEN** the app stack is updated with only a different `AppVersion`
+- **THEN** no instance is replaced: the AMI is the one the stack was created with until an image upgrade is asked for explicitly (ADR-0017)
+
 #### Scenario: Data survives a container restart
 - **WHEN** a shard's container is restarted
 - **THEN** its data directory on the host is reused and its keys are still there

@@ -52,9 +52,8 @@ client ──HTTP──▶ coordinator (public subnet, :8080)
 
 ```
 cmd/kvnode/          main: --role=coordinator | --role=shard
-internal/api/        HTTP handlers for the public API
 internal/ring/       consistent hashing ring
-internal/coordinator/ table registry, routing, membership
+internal/coordinator/ public API handlers, table registry, routing, membership
 internal/shard/      shard HTTP handlers, registration loop
 internal/store/      in-memory map + append-only log
 api/openapi.yaml     the API contract
@@ -67,9 +66,9 @@ bench/               go-ycsb binding and runner
   the switchable NAT (ADR-0005) during boot.
 - [Adding a shard remaps keys without moving data] → M2 adds shards only before loading
   data; migration is M5.
-- [The coordinator is a single point of failure and a bottleneck] → accepted in M2; it is
-  stateless apart from the table registry, so it can be scaled out behind a load balancer
-  later (control question).
+- [The coordinator is a single point of failure and a bottleneck] → accepted in M2. It is
+  not stateless: it holds the table registry and the shard membership, and shards heartbeat
+  to its one address. Scaling it out needs both in a shared place first (control question).
 - [Lab credentials expire] → deploy jobs fail outside a session; tests and builds still run.
 - [Budget] → app stack up only during sessions; `make down-app` at the end.
 

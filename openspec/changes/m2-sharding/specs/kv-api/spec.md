@@ -53,8 +53,13 @@ on `/v1/tables/{table}/items/{pk}` and, for tables with a sort key, on
 - **THEN** the response is 400
 
 ### Requirement: Health endpoint
-Every node SHALL answer `GET /health` with 200 while it can serve requests.
+Every node SHALL answer `GET /health` with 200 while it can serve requests, and with 503
+while it can't; the body is the same in both cases.
 
 #### Scenario: Health
 - **WHEN** `GET /health` is called on the coordinator or a shard that is running
 - **THEN** the response is 200
+
+#### Scenario: Coordinator not ready
+- **WHEN** `GET /health` is called on a coordinator that still waits for the expected number of shards to register
+- **THEN** the response is 503 and the body reports `ready: false` and how many shards it has
