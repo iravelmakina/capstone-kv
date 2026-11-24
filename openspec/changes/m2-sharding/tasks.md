@@ -35,8 +35,8 @@
 
 ## 6. Infrastructure
 
-- [ ] 6.1 `infra/artifacts.yaml` (bucket, `Retain`) and `infra/app.yaml` per ADR-0014; `cfn-lint` passes; no `vpc-`/`subnet-` literals
-- [ ] 6.2 `Makefile`: targets for the new stacks (`up-app`, `down-app`, `push-image`), teardown order app → network
+- [x] 6.1 `infra/artifacts.yaml` (bucket, `Retain`) and `infra/app.yaml` per ADR-0014; `cfn-lint` passes; no `vpc-`/`subnet-` literals
+- [x] 6.2 `Makefile`: targets for the new stacks (`up-app`, `down-app`, `push-image`), teardown order app → network
 - [ ] 6.3 First deploy (author approves each write call): every node healthy; record whether `dnf install docker` worked through the S3 endpoint (evidence in `docs/m2/evidence/`)
 - [ ] 6.4 Check the security groups and that shards have no public IP; save the outputs
 

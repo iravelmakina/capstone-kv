@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  capstone-kv artifacts: the S3 bucket that holds release images (one folder per commit
+  SHA) and benchmark results. Long-lived; survives app teardowns. ADRs 0009, 0014.
+
+Resources:
+  # Kept when the stack is deleted (Retain): releases and benchmark results outlive the
+  # stack, and CloudFormation can't delete a non-empty bucket anyway.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Bucket names are global across AWS; the account ID makes ours unique.
+      BucketName: !Sub velmakina-kv-artifacts-${AWS::AccountId}
+      PublicAccessBlockConfiguration:      # nothing in it is ever public
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256          # S3-managed keys: no KMS key to create or pay for
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-releases         # ~9 MB per release; keep two months
+            Status: Enabled
+            Prefix: releases/
+            ExpirationInDays: 60
+
+Outputs:
+  BucketName:
+    Value: !Ref ArtifactsBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-BucketName

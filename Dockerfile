@@ -2,7 +2,11 @@
 # Built in CI, saved with `docker save`, shipped through S3 and loaded on EC2.
 
 # --- build stage: compile with the Go toolchain -----------------------------------------
-FROM golang:1.24-bookworm AS build
+# The build stage runs on the machine's own CPU ($BUILDPLATFORM, e.g. an ARM Mac) and
+# cross-compiles for the target ($TARGETARCH, amd64 for t3 instances): no slow emulation.
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 WORKDIR /src
 # Dependencies first, so this layer is cached until go.mod/go.sum change.
 COPY go.mod go.sum ./
@@ -11,7 +15,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 # CGO off = a fully static binary that needs no C library in the final image.
 # -trimpath and -s -w drop local paths and debug symbols: smaller, reproducible.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/kvnode ./cmd/kvnode
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/kvnode ./cmd/kvnode
 # An empty data directory to copy into the final image (it has no shell to run mkdir).
 RUN mkdir -p /out/data
 

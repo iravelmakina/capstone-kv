@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  capstone-kv M2 app: a coordinator in a public subnet and two shards in private subnets of
+  two AZs, running the release named by AppVersion. Network IDs come from the network
+  stack's exports (ADR-0003); the image comes from the artifacts bucket. ADR-0014.
+
+Parameters:
+  AppVersion:
+    Type: String
+    Description: Commit SHA of the release to run (folder releases/<sha>/ in the bucket).
+    AllowedPattern: ^[0-9a-f]{7,40}$
+  AllowedClientCidr:
+    Type: String
+    Description: Extra address range allowed to call the coordinator (e.g. my IP as x.x.x.x/32).
+    AllowedPattern: ^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$
+  NetworkStack:
+    Type: String
+    Default: velmakina-kv-network
+  ArtifactsStack:
+    Type: String
+    Default: velmakina-kv-artifacts
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]   # the lab denies anything bigger (M1 evidence 39-40)
+  ImageId:
+    # Latest Amazon Linux 2023 AMI, looked up at deploy time from AWS's public parameter.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # --- Security groups ------------------------------------------------------------------
+  CoordinatorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: capstone-kv coordinator - API from inside the VPC and the allowed client range
+      VpcId: !ImportValue
+        Fn::Sub: ${NetworkStack}-VpcId
+      SecurityGroupIngress:
+        - Description: API from inside the VPC (benchmark client)
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !ImportValue
+            Fn::Sub: ${NetworkStack}-VpcCidr
+        - Description: API from the allowed client range (my laptop)
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref AllowedClientCidr
+      Tags:
+        - { Key: Name, Value: velmakina-kv-coordinator-sg }
+
+  # Shards accept traffic only from members of the coordinator's group: no address ranges,
+  # so nothing else in the VPC (or outside it) can reach them.
+  ShardSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: capstone-kv shards - only the coordinator may call them
+      VpcId: !ImportValue
+        Fn::Sub: ${NetworkStack}-VpcId
+      SecurityGroupIngress:
+        - Description: internal key-value API from the coordinator
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref CoordinatorSecurityGroup
+      Tags:
+        - { Key: Name, Value: velmakina-kv-shard-sg }
+
+  # --- Instances ------------------------------------------------------------------------
+  # User data is MIME multipart: the cloud-config part tells cloud-init to run the script
+  # part on EVERY boot, not only the first. Changing AppVersion changes the user data,
+  # CloudFormation stops and starts the instance, and the script then loads the new image.
+  # The data on the EBS volume and the private IP survive a stop/start.
+  Coordinator:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: Inventory-App-Role     # the only role the lab lets us pass (M1)
+      CreditSpecification: { CPUCredits: unlimited }   # benchmarks aren't throttled (M1 budget)
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !ImportValue
+            Fn::Sub: ${NetworkStack}-PublicSubnetA
+          AssociatePublicIpAddress: true         # the public subnet doesn't hand IPs out by itself
+          GroupSet: [!Ref CoordinatorSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            Content-Type: multipart/mixed; boundary="//"
+            MIME-Version: 1.0
+
+            --//
+            Content-Type: text/cloud-config; charset="us-ascii"
+
+            #cloud-config
+            cloud_final_modules:
+            - [scripts-user, always]
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+
+            #!/bin/bash
+            set -euxo pipefail
+            aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
+            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} coordinator 2
+            --//--
+          - Bucket: !ImportValue
+              Fn::Sub: ${ArtifactsStack}-BucketName
+      Tags:
+        - { Key: Name, Value: velmakina-kv-coordinator }
+
+  Shard1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: Inventory-App-Role
+      CreditSpecification: { CPUCredits: unlimited }
+      SubnetId: !ImportValue
+        Fn::Sub: ${NetworkStack}-PrivateSubnetA   # AZ a; no public IP (private subnet)
+      SecurityGroupIds: [!Ref ShardSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            Content-Type: multipart/mixed; boundary="//"
+            MIME-Version: 1.0
+
+            --//
+            Content-Type: text/cloud-config; charset="us-ascii"
+
+            #cloud-config
+            cloud_final_modules:
+            - [scripts-user, always]
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+
+            #!/bin/bash
+            set -euxo pipefail
+            aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
+            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} shard shard-1 ${Coordinator.PrivateIp}
+            --//--
+          - Bucket: !ImportValue
+              Fn::Sub: ${ArtifactsStack}-BucketName
+      Tags:
+        - { Key: Name, Value: velmakina-kv-shard-1 }
+
+  Shard2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: Inventory-App-Role
+      CreditSpecification: { CPUCredits: unlimited }
+      SubnetId: !ImportValue
+        Fn::Sub: ${NetworkStack}-PrivateSubnetB   # AZ b: a different AZ from shard-1
+      SecurityGroupIds: [!Ref ShardSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            Content-Type: multipart/mixed; boundary="//"
+            MIME-Version: 1.0
+
+            --//
+            Content-Type: text/cloud-config; charset="us-ascii"
+
+            #cloud-config
+            cloud_final_modules:
+            - [scripts-user, always]
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+
+            #!/bin/bash
+            set -euxo pipefail
+            aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
+            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} shard shard-2 ${Coordinator.PrivateIp}
+            --//--
+          - Bucket: !ImportValue
+              Fn::Sub: ${ArtifactsStack}-BucketName
+      Tags:
+        - { Key: Name, Value: velmakina-kv-shard-2 }
+
+Outputs:
+  CoordinatorInstanceId:
+    Description: For SSM commands (smoke test, logs)
+    Value: !Ref Coordinator
+  CoordinatorPublicIp:
+    Description: Changes when the instance is stopped and started (no Elastic IP, on purpose)
+    Value: !GetAtt Coordinator.PublicIp
+  CoordinatorUrl:
+    Value: !Sub http://${Coordinator.PublicIp}:8080
+  AppVersion:
+    Description: The release this stack runs
+    Value: !Ref AppVersion
