@@ -271,5 +271,5 @@ Other points:
 | §1.1 `Remove` doesn't stick; membership not persisted; admin endpoints on the public port | Accept, deferred | A persisted, versioned ring with explicit join/leave and a separate admin port is M5's rebalancing design (ADR then). In M2 the port is reachable only from the VPC and my IP. The comment "for good" is corrected now |
 | §3 registration API has no spec | Accept | Documented in `api/internal-openapi.yaml`, separate from the public contract (ADR-0010 stands) |
 | §1.2 no LSN/version, no compaction; §2.1 slots; §2.2 ASGs; §1.5 latency curve, per-shard counts | Accept, deferred | M3 (versions, LSN, group commit), M5 (slots or ring with epoch, ASGs, migration); benchmark additions in M3 so both milestones measure the same way |
-| §4.9 / §4.10 raw output and the workflow never green | Accept | Only summaries leave the client (instance role can't write S3); stated in `benchmark.md`. The fixed workflow gets a green run after these fixes |
+| §4.9 / §4.10 raw output and the workflow never green | Accept | Only summaries leave the client (instance role can't write S3); stated in `benchmark.md`. The fixed workflow gets a green run after these fixes: done, run 45476470255 (`docs/m2/pipeline.md`, run 8) |
 | §4.16 bookkeeping | Accept | Task 7.2 ticked; `design.md` no longer names `internal/api/` (ADR-0010 is accepted and stays; noted here) |

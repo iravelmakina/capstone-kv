@@ -89,6 +89,26 @@ Under 3% apart: the baseline is stable. **No failed requests** in any run (0 log
    acknowledges `fsync` faster than EBS, and there was no network between containers. The
    AWS numbers are the baseline.
 
+## Check after the AI review fixes (release `77fdfeb`, one run)
+
+The fixes (tasks 10.1–10.7) changed the store's write path (a failed write is cut back) and
+`/health`. A single run of the green benchmark workflow (`docs/m2/pipeline.md`, run 8),
+2026-11-24 20:03–20:17 UTC, same setup, checks that nothing got slower. **It is not a new
+baseline:** one run, not the median of three.
+
+| | Baseline (`30e1846`, median of 3) | After the fixes (`77fdfeb`, 1 run) |
+| --- | ---: | ---: |
+| Load, ops/s | 940 | 948 |
+| A total, ops/s | 1,804 | 1,854 |
+| A read p99 / update p99, ms | 6.24 / 32.59 | 4.82 / 30.67 |
+| B total, ops/s | 6,891 | 7,442 |
+| B read p99 / update p99, ms | 5.45 / 10.22 | 4.88 / 9.53 |
+
+No regression. B came out 8% above the baseline median (and above the best baseline run,
+6,947), probably run-to-run variation of a single run; the success path of a write gained
+only one addition. One `READ_ERROR` in A (1 of 500,166 reads): most likely the YCSB key-range
+quirk below; the client's summary doesn't include the request, so this isn't proven.
+
 ## Notes
 
 - **Workload choice:** A and B are YCSB's standard key-value workloads: A stresses the write
@@ -96,7 +116,8 @@ Under 3% apart: the baseline is stable. **No failed requests** in any run (0 log
   is a subset of B; E needs range scans, which M2 doesn't have (ADR-0012).
 - **YCSB key-range quirk:** for `zipfian`, YCSB's key range has no "−1" at the top, so one
   never-loaded key is occasionally requested; a read of it gets 404 (`READ_ERROR`). Expected
-  rate ≈ 1/(records + 1): seen twice in a 5,000-record local test, never in these runs.
+  rate ≈ 1/(records + 1): seen twice in a 5,000-record local test, never in the baseline
+  runs, once in the check run after the fixes.
 - **Integrity:** a local run with `dataintegrity=true` (every read checked byte for byte)
   found no mismatches.
 - **How results leave the client:** the instance role can't write to S3 (M1 evidence 63),

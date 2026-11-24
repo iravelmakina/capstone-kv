@@ -14,22 +14,23 @@ Every app stack, from creation to deletion (`list-stacks --stack-status-filter D
 | 2 | 01:02–01:25 | 22.2 | 3 | CI: first deploy, update, template change, rollback |
 | 3 | 10:59–11:07 | 7.3 | 3 (+ client ~3 min) | CI deploy, then the failed benchmark workflow |
 | 4 | 11:10–12:40 | 90.0 | 4 | benchmark from the laptop (1 trial pass + the 3-run baseline) |
+| 5 | 19:58–20:17 | 19.0 | 3 (+ client ~14 min) | CI deploy after the review fixes, then the green benchmark workflow (1 run) |
 
-**Total: 2.06 hours of app stack, 7.7 instance-hours.**
+**Total: 2.38 hours of app stack, 8.9 instance-hours.**
 
 ## Estimated cost (us-east-1 on-demand prices from the M1 budget)
 
 | Item | Usage | Cost |
 | --- | --- | ---: |
-| t3.small | 7.7 instance-hours × $0.0208 | $0.16 |
-| Public IPv4 (coordinator, client) | 3.6 h × $0.005 | $0.02 |
-| gp3 root volumes (8 GiB) | 7.7 h × 8 GB × $0.08 / 730 h | $0.01 |
+| t3.small | 8.9 instance-hours × $0.0208 | $0.19 |
+| Public IPv4 (coordinator, client) | 4.2 h × $0.005 | $0.02 |
+| gp3 root volumes (8 GiB) | 8.9 h × 8 GB × $0.08 / 730 h | $0.01 |
 | CPU surplus credits (coordinator) | 0.09 credits | < $0.001 |
-| Data between AZs during the benchmark | ≈ 18 GB × $0.02 (both directions) | ≈ $0.37 |
+| Data between AZs during the benchmarks | ≈ 24 GB × $0.02 (both directions) | ≈ $0.49 |
 | S3 (releases ~3.5 MB each, results) | a few MB | < $0.01 |
-| **Ours, M2 so far** | | **≈ $0.57** |
+| **Ours, M2 so far** | | **≈ $0.72** |
 
-**The surprise is data between AZs:** about 6.1 million benchmark operations of ~2 KB each
+**The surprise is data between AZs:** about 6.1 million baseline operations (plus 2.1 million in the check run) of ~2 KB each
 crossed from the client (AZ b) to the coordinator (AZ a), and half of them again from the
 coordinator to shard-2 (AZ b). The M1 budget assumed 5 GB ($0.10). Two fixes for later runs:
 put the benchmark client in the coordinator's AZ (also lowers latency), and remember that M3
@@ -37,7 +38,7 @@ replicas in three AZs will make every write cross AZs by design.
 
 ## Against the budget
 
-- **Ours:** ≈ $0.57 for all of M2's AWS work, against ≈ $9.82 planned for a month of lab use.
+- **Ours:** ≈ $0.72 for all of M2's AWS work, against ≈ $9.82 planned for a month of lab use.
   Instances were up only while needed (`make down-app` after every session).
 - **The lab's NAT Gateway** costs more than all of this every day it runs (≈ $1.20/day,
   M1 evidence 94); it isn't ours and we don't delete it.

@@ -58,7 +58,7 @@
 - [x] 9.2 `docs/m2/control-questions.md` (incl. virtual nodes on node failure, load balancing and service discovery, p95 vs p99)
 - [x] 9.3 README: bring up, verify, what changed since M1
 - [x] 9.4 Actual spend for the M2 sessions vs the M1 budget
-- [ ] 9.5 `AGENT_WORKLOG.md` row for every agent-made file
+- [x] 9.5 `AGENT_WORKLOG.md` row for every agent-made file
 
 ## 10. Fixes from the AI design review (`docs/m2/ai-review.md`, verdicts agreed)
 
@@ -69,4 +69,4 @@
 - [x] 10.5 `ExpectedShards` parameter in `infra/app.yaml` (ADR-0014)
 - [x] 10.6 `api/internal-openapi.yaml`: shard registration and the shards' key-value endpoints
 - [x] 10.7 Wording: coordinator not stateless, single lock across `fsync`, ring key description, "for good" comment
-- [ ] 10.8 A green run of the benchmark workflow after the fixes
+- [x] 10.8 A green run of the benchmark workflow after the fixes

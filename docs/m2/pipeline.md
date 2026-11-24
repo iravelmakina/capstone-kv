@@ -106,6 +106,32 @@ upload. **Fix:** the client prints only the final summaries into the SSM output,
 `make bench-aws` stores them and uploads them with its own credentials. The baseline was
 then run from a laptop with the same targets: `docs/m2/benchmark.md`.
 
+### 7. Deploy after the AI review fixes — 2026-11-24, 19:55–20:01 UTC
+
+[Run 45475507458](https://github.com/iravelmakina/capstone-kv/actions/runs/45475507458)
+(`ci-cd.yml`, `77fdfeb`, fresh lab session): all five jobs green. What the log shows for each
+fix (tasks 10.1–10.4):
+
+| Fix | Log |
+| --- | --- |
+| Only "no changes" is a successful change-set failure | network and artifacts stacks: `didn't contain changes` → `no changes` → `nothing to execute` |
+| AMI pinned (ADR-0017) | new app stack: `AMI: ParameterKey=ImageId,ParameterValue=ami-0aacbf72109c53c0c`, looked up once |
+| Smoke checks the intended version on every node | `ok coordinator version (77fdfebb29c5)`, `ok shard http://10.20.70.241:8080 version (77fdfebb29c5)`, `ok shard http://10.20.91.109:8080 version (77fdfebb29c5)`, then the four operations |
+
+### 8. Benchmark workflow: green — 2026-11-24, 20:02–20:18 UTC
+
+[Run 45476470255](https://github.com/iravelmakina/capstone-kv/actions/runs/45476470255)
+(`benchmark.yml`, `runs=1`, teardown on), started by hand on `main` (task 10.8):
+
+- **Update keeps the instances:** `AMI: ParameterKey=ImageId,UsePreviousValue=true`; the change
+  set adds only `BenchmarkClientInstance` and `ClientSecurityGroup`. The coordinator and the
+  shards aren't touched.
+- **Load, A and B ran on the client**, the summaries came back through SSM and were saved in
+  S3 (`bench-results/77fdfebb29c5/20261124T201708Z.txt`) and as a workflow artifact.
+- **Teardown:** `velmakina-kv-app deleted`; afterwards no app instances are left (checked
+  with `describe-instances`).
+- Numbers (one run, a check against the baseline, not a new baseline): `docs/m2/benchmark.md`.
+
 ## Notes
 
 - **Every commit on `main` is a release**, including a template-only or docs-only one, so
