@@ -28,6 +28,12 @@ Resources:
             Status: Enabled
             Prefix: releases/
             ExpirationInDays: 60
+          # `make release` streams images with multipart uploads; a broken stream leaves its
+          # parts behind, invisible in listings but billed. Clean them up after a day.
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
 
 Outputs:
   BucketName:
