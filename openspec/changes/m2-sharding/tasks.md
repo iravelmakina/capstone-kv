@@ -8,7 +8,7 @@
 - [x] 1.2 Author reviews proposal, design, specs and ADRs 0009–0016; sets them to `Accepted` in chat
 - [x] 1.3 `openspec validate m2-sharding --strict` passes
 - [x] 1.4 Spec-only commit (no code, no templates)
-- [ ] 1.5 Author runs `gh auth login`; repo `iravelmakina/capstone-kv` created; `main` and `m2-sharding` pushed
+- [x] 1.5 Author runs `gh auth login`; repo `iravelmakina/capstone-kv` created; `main` and `m2-sharding` pushed
 
 ## 2. API and ring
 
