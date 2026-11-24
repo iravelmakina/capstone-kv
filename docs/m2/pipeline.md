@@ -137,8 +137,10 @@ fix (tasks 10.1–10.4):
 `paths-ignore` for `docs/**`, `openspec/**` and `**/*.md` (task 11.1, `2473222`). The push
 of `2473222` changed the workflow file, so it ran as usual
 ([run 45483754599](https://github.com/iravelmakina/capstone-kv/actions/runs/45483754599)).
-The next push, the commit that adds this section and changes only this file, must start
-**no** run (task 11.2); the result is recorded below.
+The next push, `011ce3d`, added this section and changed only this file: **no run** was
+started (task 11.2). Checked a minute after the push: `gh run list` shows no run for it, and
+the API (`actions/runs?head_sha=011ce3d…`) returns `total_count: 0`. The commit recording
+this result is documentation-only as well.
 
 ## Notes
 
