@@ -132,9 +132,19 @@ fix (tasks 10.1–10.4):
   with `describe-instances`).
 - Numbers (one run, a check against the baseline, not a new baseline): `docs/m2/benchmark.md`.
 
+### 9. Documentation-only commits skip the pipeline (ADR-0019) — 2026-11-24
+
+`paths-ignore` for `docs/**`, `openspec/**` and `**/*.md` (task 11.1, `2473222`). The push
+of `2473222` changed the workflow file, so it ran as usual
+([run 45483754599](https://github.com/iravelmakina/capstone-kv/actions/runs/45483754599)).
+The next push, the commit that adds this section and changes only this file, must start
+**no** run (task 11.2); the result is recorded below.
+
 ## Notes
 
-- **Every commit on `main` is a release**, including a template-only or docs-only one, so
-  each push to `main` also restarts the app. Deliberate (the version names the commit), but
-  docs-only changes stay on the feature branch until there's code to ship with them.
+- **Every commit on `main` that changes the app is a release** (ADR-0009): code, templates,
+  scripts, the Makefile or the workflows. A commit that changes only documentation runs
+  nothing (ADR-0019), so the app stack's `AppVersion` is the last commit that was deployed,
+  which can be older than the tip of `main`; `git log <AppVersion>..main` then lists only
+  documentation commits.
 - **Deploys need fresh secrets**: the lab credentials expire with the 3-hour session.
