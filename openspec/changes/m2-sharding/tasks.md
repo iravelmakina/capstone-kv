@@ -73,5 +73,5 @@
 
 ## 11. Documentation-only commits (ADR-0019)
 
-- [ ] 11.1 `ci-cd.yml`: `paths-ignore` for `docs/**`, `openspec/**`, `**/*.md` on push and pull request
+- [x] 11.1 `ci-cd.yml`: `paths-ignore` for `docs/**`, `openspec/**`, `**/*.md` on push and pull request
 - [ ] 11.2 Check on GitHub: a docs-only push to `m2-sharding` starts no run; record it in `docs/m2/pipeline.md` and correct its "every commit on `main` is a release" note

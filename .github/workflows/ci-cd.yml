@@ -7,9 +7,20 @@
 # session the deploy jobs fail at the first AWS call; test and build-free checks still run.
 name: ci-cd
 
+# A push or PR whose changed files are ALL documentation runs nothing (ADR-0019): no build,
+# no deploy, so docs can land on main without a lab session. One changed file outside these
+# paths runs the whole pipeline. Manual runs (rollback) are never filtered.
 on:
   push:
+    paths-ignore:
+      - "docs/**"
+      - "openspec/**"
+      - "**/*.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "openspec/**"
+      - "**/*.md"
   workflow_dispatch:
     inputs:
       version:
