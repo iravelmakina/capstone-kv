@@ -70,3 +70,8 @@
 - [x] 10.6 `api/internal-openapi.yaml`: shard registration and the shards' key-value endpoints
 - [x] 10.7 Wording: coordinator not stateless, single lock across `fsync`, ring key description, "for good" comment
 - [x] 10.8 A green run of the benchmark workflow after the fixes
+
+## 11. Documentation-only commits (ADR-0019)
+
+- [ ] 11.1 `ci-cd.yml`: `paths-ignore` for `docs/**`, `openspec/**`, `**/*.md` on push and pull request
+- [ ] 11.2 Check on GitHub: a docs-only push to `m2-sharding` starts no run; record it in `docs/m2/pipeline.md` and correct its "every commit on `main` is a release" note

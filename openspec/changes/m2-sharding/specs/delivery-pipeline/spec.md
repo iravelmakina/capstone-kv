@@ -9,16 +9,21 @@ separately.
 
 ### Requirement: Checks on every push
 Every push and pull request SHALL run `go vet`, the tests, the contract test and
-`cfn-lint`.
+`cfn-lint`, unless all of its changed files are documentation (ADR-0019).
 
 #### Scenario: Failing test blocks
 - **WHEN** a test fails
 - **THEN** the workflow fails and no build or deploy job runs
 
 ### Requirement: Deploy from main
-A push to `main` SHALL build the image, upload it under the commit SHA, deploy the network
-and artifacts stacks, deploy the app stack with `AppVersion` set to that SHA, and run a
-smoke test; every stack update SHALL go through a change set.
+A push to `main` that changes anything other than documentation SHALL build the image,
+upload it under the commit SHA, deploy the network and artifacts stacks, deploy the app
+stack with `AppVersion` set to that SHA, and run a smoke test; every stack update SHALL go
+through a change set.
+
+#### Scenario: Documentation-only change
+- **WHEN** a commit on `main` changes only files under `docs/` or `openspec/`, or Markdown files
+- **THEN** no job runs, and the app stack keeps running the `AppVersion` it had
 
 #### Scenario: Infra change deployed
 - **WHEN** a commit on `main` changes a template
