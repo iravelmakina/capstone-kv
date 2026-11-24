@@ -1,0 +1,91 @@
+First M2 deploy in the AWS Academy lab (profile academy, role voclabs, us-east-1).
+Account IDs redacted as <ACCOUNT_ID>. Each section is one step, in order.
+
+===== [D0] starting point (read-only), 2026-11-24 =====
+velmakina-kv-network     CREATE_COMPLETE  2026-11-05T22:23:03Z   (M1, 11 exports)
+velmakina-kv-artifacts   does not exist
+velmakina-kv-app         does not exist
+running/pending instances in the account: 0
+
+===== [D1] artifacts stack =====
+$ CONFIRM=yes make up-artifacts
++-----+-------------------+-------------------+-------+
+|  Add|  ArtifactsBucket  |  AWS::S3::Bucket  |  None |
++-----+-------------------+-------------------+-------+
+CREATE_COMPLETE
+
+# checks (read-only)
+export velmakina-kv-artifacts-BucketName = velmakina-kv-artifacts-<ACCOUNT_ID>
+public access block: True True True True
+encryption: AES256
+lifecycle: expire-old-releases Enabled 60 (days)
+tag Project: capstone-kv
+
+===== [D2] release of commit d9b39b65afc0 =====
+$ make release
+naming to docker.io/library/capstone-kv:d9b39b65afc0 done
+upload: scripts/node-boot.sh to s3://velmakina-kv-artifacts-<ACCOUNT_ID>/releases/d9b39b65afc0/node-boot.sh
+released d9b39b65afc0 to s3://velmakina-kv-artifacts-<ACCOUNT_ID>/releases/d9b39b65afc0/
+
+$ aws s3 ls s3://velmakina-kv-artifacts-<ACCOUNT_ID>/releases/d9b39b65afc0/
+2026-11-24 01:33:01    3531976 kvnode.tar.gz      (image, gzip: 3.4 MB)
+2026-11-24 01:33:02       2550 node-boot.sh
+local image capstone-kv:d9b39b65afc0: amd64/linux, 8811122 bytes
+
+===== [D3] app stack, release d9b39b65afc0 (00:33:45-00:35:22 UTC, 97 s) =====
+$ CONFIRM=yes make up-app        (AllowedClientCidr = <MY_IP>/32, looked up by the Makefile)
++-----+----------------------------+---------------------------+-------+
+|  Add|  CoordinatorSecurityGroup  |  AWS::EC2::SecurityGroup  |  None |
+|  Add|  Coordinator               |  AWS::EC2::Instance       |  None |
+|  Add|  Shard1                    |  AWS::EC2::Instance       |  None |
+|  Add|  Shard2                    |  AWS::EC2::Instance       |  None |
+|  Add|  ShardSecurityGroup        |  AWS::EC2::SecurityGroup  |  None |
++-----+----------------------------+---------------------------+-------+
+CREATE_COMPLETE
+
+===== [D4] app up: Docker installed in private subnets (ADR-0009 risk), shards registered =====
+$ curl http://<PUBLIC_IP>:8080/health     (polled every 5 s from the laptop)
+00:35:55 {"ready":false,"role":"coordinator","shards":0,"status":"ok"}
+00:36:05 {"ready":false,"role":"coordinator","shards":1,"status":"ok"}
+00:36:11 {"ready":true,"role":"coordinator","shards":2,"status":"ok"}
+$ curl http://<PUBLIC_IP>:8080/internal/v1/shards
+[{"id":"shard-1","address":"http://10.20.78.207:8080","available":true,"silentFor":"4s"},
+ {"id":"shard-2","address":"http://10.20.80.138:8080","available":true,"silentFor":"3s"}]
+# The shards are in private subnets with no route to the internet. Registering means each
+# one installed Docker from the Amazon Linux repos and downloaded the image from S3, both
+# through the S3 gateway endpoint. Ready 49 s after CREATE_COMPLETE.
+
+$ scripts/smoke.sh http://<PUBLIC_IP>:8080
+ok   create table (201)
+ok   CREATE (200)
+ok   READ (200)
+ok   READ returns value ({"hello":"world"})
+ok   EXISTS (200)
+ok   DELETE (204)
+ok   READ after delete (404)
+ok   EXISTS after delete (404)
+smoke test passed
+
+===== [D5] placement and access (task 6.4) =====
+$ aws ec2 describe-instances (stack velmakina-kv-app)
+name                      AZ ID     private IP     public IP     type      IMDS
+velmakina-kv-coordinator  use1-az1  10.20.12.80    <PUBLIC_IP>   t3.small  v2 required
+velmakina-kv-shard-1      use1-az1  10.20.78.207   none          t3.small  v2 required
+velmakina-kv-shard-2      use1-az2  10.20.80.138   none          t3.small  v2 required
+# coordinator in public subnet A (10.20.0.0/20); shards in private A (10.20.64.0/20) and
+# private B (10.20.80.0/20), two AZs, no public IPs.
+CPU credits: 3 x unlimited
+
+$ aws ec2 describe-security-groups (stack velmakina-kv-app)
+ShardSecurityGroup        in: 8080 from sg-<coordinator> only, no address ranges
+CoordinatorSecurityGroup  in: 8080 from 10.20.0.0/16 (VPC) and <MY_IP>/32
+
+===== [D6] teardown at the end of the session (00:37:46-00:40:50 UTC, 184 s) =====
+$ make down-app
+velmakina-kv-app deleted
+
+velmakina-kv-network     CREATE_COMPLETE   (stays, $0)
+velmakina-kv-artifacts   CREATE_COMPLETE   (stays, release kept in S3)
+velmakina-kv-app         does not exist
+running/pending instances: 0; app security groups left: 0
+# App stack was up ~4 minutes: 3 x t3.small + 1 public IPv4 ~ $0.07/h -> under $0.01.
