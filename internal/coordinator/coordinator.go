@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
 	"github.com/iravelmakina/capstone-kv/internal/shard"
@@ -82,7 +83,9 @@ func (c *Coordinator) Handler() http.Handler {
 
 func (c *Coordinator) health(w http.ResponseWriter, r *http.Request) {
 	ready, n := c.members.Ready()
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "role": "coordinator", "ready": ready, "shards": n})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "role": "coordinator", "version": buildinfo.Version, "ready": ready, "shards": n,
+	})
 }
 
 // --- tables ---------------------------------------------------------------------------

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Smoke test: the four operations against a running coordinator.
-#   scripts/smoke.sh [base-url]          (default http://localhost:8080)
-# Used locally after `docker compose up` and by the CI smoke job on the coordinator.
+#   scripts/smoke.sh [base-url] [expected-version]   (default http://localhost:8080)
+# Used locally after `docker compose up` and by the CI smoke job on the coordinator, which
+# passes the release it deployed: then /health must report exactly that version.
 # Exits non-zero at the first unexpected status.
 set -euo pipefail
 BASE=${1:-http://localhost:8080}
+EXPECT_VERSION=${2:-}
 TABLE=smoke
 KEY="item-$(date +%s)-$RANDOM"   # a fresh key each run, so runs don't affect each other
 
@@ -31,6 +33,11 @@ for _ in $(seq 60); do
   sleep 1
 done
 curl -s "$BASE/health" | grep -q '"ready":true' || { echo "FAIL coordinator not ready"; exit 1; }
+
+if [ -n "$EXPECT_VERSION" ]; then
+  running=$(curl -s "$BASE/health" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+  check "running version" "$EXPECT_VERSION" "$running"
+fi
 
 code=$(status POST /v1/tables "{\"name\":\"$TABLE\",\"partitionKey\":\"id\"}")
 [ "$code" = 201 ] || [ "$code" = 409 ] || { echo "FAIL create table: $code"; exit 1; }

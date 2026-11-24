@@ -249,7 +249,8 @@ func TestExplicitRemove(t *testing.T) {
 func TestHealth(t *testing.T) {
 	c := newCluster(t, 2, true)
 	code, body := call(t, "GET", c.coord.URL+"/health", "")
-	if code != 200 || !strings.Contains(body, `"role":"coordinator"`) || !strings.Contains(body, `"ready":true`) {
+	if code != 200 || !strings.Contains(body, `"role":"coordinator"`) || !strings.Contains(body, `"ready":true`) ||
+		!strings.Contains(body, `"version":"dev"`) { // tests run unlinked builds: version "dev"
 		t.Fatalf("health = %d %s", code, body)
 	}
 }

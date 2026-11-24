@@ -236,10 +236,13 @@ components:
         - { name: Ira, city: Kyiv }
     Health:
       type: object
-      required: [status, role]
+      required: [status, role, version]
       properties:
         status: { type: string, enum: [ok] }
         role: { type: string, enum: [coordinator, shard] }
+        version:
+          type: string
+          description: Commit SHA the running binary was built from ("dev" for local builds)
     Error:
       type: object
       required: [error]

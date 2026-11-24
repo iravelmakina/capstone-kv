@@ -7,6 +7,8 @@
 FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+# The release's commit SHA (make release passes it); compiled into the binary for /health.
+ARG VERSION=dev
 WORKDIR /src
 # Dependencies first, so this layer is cached until go.mod/go.sum change.
 COPY go.mod go.sum ./
@@ -15,7 +17,9 @@ COPY cmd ./cmd
 COPY internal ./internal
 # CGO off = a fully static binary that needs no C library in the final image.
 # -trimpath and -s -w drop local paths and debug symbols: smaller, reproducible.
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/kvnode ./cmd/kvnode
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X github.com/iravelmakina/capstone-kv/internal/buildinfo.Version=$VERSION" \
+    -o /out/kvnode ./cmd/kvnode
 # An empty data directory to copy into the final image (it has no shell to run mkdir).
 RUN mkdir -p /out/data
 

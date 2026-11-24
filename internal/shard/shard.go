@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
@@ -40,7 +41,7 @@ func KeyPath(storageKey string) string {
 func Handler(st *store.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "role": "shard", "keys": st.Len()})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "role": "shard", "version": buildinfo.Version, "keys": st.Len()})
 	})
 	// A "GET" pattern also matches HEAD requests; the handler tells them apart.
 	mux.HandleFunc("GET /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
