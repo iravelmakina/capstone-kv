@@ -1,0 +1,129 @@
+# capstone-kv pipeline (ADR-0015): test on every push and PR; on main, build a release,
+# deploy infrastructure and the app through CloudFormation change sets, then smoke-test.
+# The same Makefile targets run on a laptop, so CI and manual deploys can't drift apart.
+#
+# AWS credentials are the lab's temporary keys, stored as repository secrets and refreshed
+# by hand each lab session (the lab allows no OIDC provider or pipeline role). Outside a
+# session the deploy jobs fail at the first AWS call; test and build-free checks still run.
+name: ci-cd
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Redeploy an existing release (12-char commit SHA), e.g. to roll back. Empty = this commit."
+        required: false
+        default: ""
+
+permissions:
+  contents: read                      # the workflow only reads the repo; AWS access comes from secrets
+
+# Two deploys must never run at once against the same stacks; a newer one waits.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PROFILE: ""                         # Makefile: use the credentials from the environment
+  CONFIRM: "yes"                      # Makefile: execute change sets without the prompt
+  # A version asked for by hand (rollback). Not named VERSION: an empty environment variable
+  # still counts as "set" for make, and would override the Makefile's default (this commit).
+  ROLLBACK_VERSION: ${{ inputs.version || '' }}
+
+jobs:
+  test:
+    name: test (vet, gofmt, go test -race, cfn-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go test (incl. contract test against api/openapi.yaml)
+        run: go test -race ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: cfn-lint
+        run: pip install --quiet cfn-lint && cfn-lint infra/*.yaml
+
+  # Everything below runs only for pushes to main (and manual runs on main).
+  build:
+    name: build release
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && inputs.version == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: build the image and upload it to S3 (skipped if this release exists)
+        run: make release
+
+  deploy-infra:
+    name: deploy infrastructure (network, artifacts)
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # Each prints its change set in the log; "no changes" is not an error.
+      - name: network stack
+        run: make up
+      - name: artifacts stack
+        run: make up-artifacts
+
+  deploy-app:
+    name: deploy app
+    needs: [build, deploy-infra]
+    # Runs after a build, or without one when a version was given by hand.
+    if: >-
+      always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
+      needs.deploy-infra.result == 'success' &&
+      (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.version != ''))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: app stack with AppVersion = the release
+        # CLIENT_CIDR: who may call the coordinator from outside. The repo variable
+        # ALLOWED_CLIENT_CIDR (my laptop's IP) if set, else only the VPC itself.
+        run: make up-app ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION} CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR || '10.20.0.0/16' }}"
+
+  smoke:
+    name: smoke test (on the coordinator, via SSM)
+    needs: deploy-app
+    if: always() && needs.deploy-app.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: create table, put, read, exists, delete
+        run: make smoke-aws

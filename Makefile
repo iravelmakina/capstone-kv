@@ -13,7 +13,8 @@ PARAMS   ?=
 # The AWS CLI runs as "python -m awscli": the repo path contains a space, which breaks the
 # first line (#!) of the venv's own `aws` script.
 AWSCLI   := $(if $(wildcard .venv/bin/aws),.venv/bin/python -m awscli,aws)
-AWS      := $(AWSCLI) --profile $(PROFILE) --region $(REGION)
+# PROFILE= (empty) uses credentials from the environment, as in CI (repository secrets).
+AWS      := $(AWSCLI) $(if $(PROFILE),--profile $(PROFILE),) --region $(REGION)
 CFN      := $(AWS) cloudformation
 
 ARTIFACTS_STACK := velmakina-kv-artifacts
@@ -23,7 +24,7 @@ VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
 .PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down smoke \
-        up-artifacts release up-app down-app app-url
+        up-artifacts release up-app down-app app-url smoke-aws
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
@@ -133,12 +134,15 @@ up-artifacts:    ## create/update the S3 artifacts stack (once; it stays)
 # a commit, or AppVersion=<sha> would lie about what runs.
 release:         ## build + upload the image of the current commit (VERSION=<sha>)
 	@set -euo pipefail; \
-	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh)" ]; then \
+	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh scripts/smoke.sh)" ]; then \
 	  echo "uncommitted changes in app files: commit first, a release is named by its commit"; exit 1; fi; \
 	[ -n "$(BUCKET)" ] || { echo "no artifacts bucket: run make up-artifacts"; exit 1; }; \
+	if $(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null 2>&1; then \
+	  echo "release $(VERSION) already in S3, nothing to build"; exit 0; fi; \
 	docker build --platform linux/amd64 -t capstone-kv:$(VERSION) .; \
 	docker save capstone-kv:$(VERSION) | gzip | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz; \
 	$(AWS) s3 cp scripts/node-boot.sh s3://$(BUCKET)/releases/$(VERSION)/node-boot.sh; \
+	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
 up-app:          ## deploy the app stack running VERSION (default: current commit)
@@ -152,6 +156,26 @@ down-app:        ## delete the app stack (end of every lab session: it costs mon
 	$(CFN) delete-stack --stack-name $(APP_STACK); \
 	$(CFN) wait stack-delete-complete --stack-name $(APP_STACK); \
 	echo "$(APP_STACK) deleted"
+
+# smoke-aws: run scripts/smoke.sh ON the coordinator through SSM Run Command, against
+# localhost. Nothing has to be opened to the internet (the CI runner's address is unknown),
+# and it tests the deployed release, not the laptop's copy of the script (ADR-0015).
+smoke-aws:       ## smoke test on the coordinator via SSM (works from CI and laptop)
+	@set -euo pipefail; \
+	id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='CoordinatorInstanceId'].OutputValue" --output text); \
+	ver=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='AppVersion'].OutputValue" --output text); \
+	echo "coordinator $$id, release $$ver: waiting for the SSM agent"; \
+	for i in $$(seq 30); do \
+	  [ "$$($(AWS) ssm describe-instance-information --filters Key=InstanceIds,Values=$$id --query 'InstanceInformationList[0].PingStatus' --output text)" = Online ] && break; \
+	  sleep 10; done; \
+	cmd=$$($(AWS) ssm send-command --instance-ids $$id --document-name AWS-RunShellScript \
+	  --comment "capstone-kv smoke $$ver" \
+	  --parameters "commands=[\"aws s3 cp s3://$(BUCKET)/releases/$$ver/smoke.sh /tmp/smoke.sh --region $(REGION)\",\"bash /tmp/smoke.sh http://localhost:8080\"]" \
+	  --query Command.CommandId --output text); \
+	$(AWS) ssm wait command-executed --command-id $$cmd --instance-id $$id || true; \
+	$(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query StandardOutputContent --output text; \
+	status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query Status --output text); \
+	echo "SSM status: $$status"; [ "$$status" = Success ]
 
 app-url:         ## print the coordinator URL of the running app stack
 	@$(CFN) describe-stacks --stack-name $(APP_STACK) \
