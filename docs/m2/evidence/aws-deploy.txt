@@ -89,3 +89,15 @@ velmakina-kv-artifacts   CREATE_COMPLETE   (stays, release kept in S3)
 velmakina-kv-app         does not exist
 running/pending instances: 0; app security groups left: 0
 # App stack was up ~4 minutes: 3 x t3.small + 1 public IPv4 ~ $0.07/h -> under $0.01.
+
+===== [note] commit hashes after the email rewrite (2026-11-24) =====
+Before the first push, the author email of all 14 commits was changed from a work address
+to ivelmakina@kse.org.ua (git filter-branch). File contents are identical (same trees on
+every branch); only the hashes changed. Hashes in this file and in older docs map as:
+  06c372c -> 9b2e7eb   end of M1 (main)
+  dc48bb6 -> 17b61e8   M1 archive
+  d0ed874 -> 0b4e5dd   M2 spec and ADRs
+  76d699a -> e8bf58d   M2 code
+  d9b39b6 -> b33e7f4   M2 infra; release d9b39b65afc0 in S3 was built from this tree
+  9bac0e0 -> 74befdb   this evidence (D0-D6)
+The next release, from CI, is named after the new hashes.

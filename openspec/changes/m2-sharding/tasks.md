@@ -4,7 +4,7 @@
 
 ## 1. Spec gate and repository
 
-- [x] 1.1 Commit the M1 archive on its own (`openspec archive m1-infra-setup`, `dc48bb6`)
+- [x] 1.1 Commit the M1 archive on its own (`openspec archive m1-infra-setup`, `17b61e8`)
 - [x] 1.2 Author reviews proposal, design, specs and ADRs 0009–0016; sets them to `Accepted` in chat
 - [x] 1.3 `openspec validate m2-sharding --strict` passes
 - [x] 1.4 Spec-only commit (no code, no templates)
