@@ -44,7 +44,7 @@
 
 - [x] 7.1 Author adds the three lab-credential secrets to the repo
 - [ ] 7.2 `.github/workflows/ci-cd.yml`: test → build → deploy-infra → deploy-app → smoke
-- [ ] 7.3 A push to `main` deploys a code change; a template change shows its change set; a rollback to an earlier SHA works; links to the runs in `docs/m2/pipeline.md`
+- [x] 7.3 A push to `main` deploys a code change; a template change shows its change set; a rollback to an earlier SHA works; links to the runs in `docs/m2/pipeline.md`
 - [ ] 7.4 `.github/workflows/benchmark.yml` (manual)
 
 ## 8. Benchmark

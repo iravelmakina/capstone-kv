@@ -43,8 +43,55 @@ test ──▶ build ──────────┐
 
 Total 4 min 12 s from push to a smoke-tested deployment. Nothing was run by hand.
 
-## Still to show (task 7.3)
+### 3. Code change on main: the running stack moves to the new version — 01:09–01:13 UTC
 
-- A code change on `main` updates the running stack to the new `AppVersion`.
-- A template change prints its change set (Modify, no replacement) before it applies.
-- A rollback: a manual run with an earlier version redeploys it without a build.
+[Run 45302907063](https://github.com/iravelmakina/capstone-kv/actions/runs/45302907063),
+commit `8b25677` (build version in `/health`; the smoke test now checks it).
+
+| Job | Result | What the log shows |
+| --- | --- | --- |
+| build | ✅ | `released 8b2567781f08` |
+| deploy-app | ✅ | change set: `Modify` Coordinator, Shard1, Shard2 (user data changed) → `UPDATE_COMPLETE` |
+| smoke | ✅ | `ok running version (8b2567781f08)`; `create table (409)`: the table from run 2 is still there |
+
+The instances were updated in place (stop/start): CloudFormation's events show only
+`UPDATE_IN_PROGRESS`/`UPDATE_COMPLETE` for them, no replacement or delete, and the table
+registered in run 2 survived on the coordinator's disk.
+
+### 4. Template change: change set first, no replacement — 01:14–01:19 UTC
+
+[Run 45303571836](https://github.com/iravelmakina/capstone-kv/actions/runs/45303571836),
+commit `4c14222` (artifacts bucket: abort incomplete multipart uploads after a day).
+
+| Job | Result | What the log shows |
+| --- | --- | --- |
+| deploy-infra | ✅ | network: no changes; artifacts: `Modify | ArtifactsBucket | AWS::S3::Bucket | False` → `UPDATE_COMPLETE` |
+| build, deploy-app, smoke | ✅ | new release `4c14222e30db` running (every commit is a release) |
+
+Checked afterwards: the bucket has both lifecycle rules (`expire-old-releases`,
+`abort-incomplete-uploads`).
+
+### 5. Rollback: a manual run with an earlier version — 01:20–01:24 UTC
+
+[Run 45304257527](https://github.com/iravelmakina/capstone-kv/actions/runs/45304257527),
+`workflow_dispatch` on `main` with `version = 8b2567781f08`.
+
+| Job | Result | What the log shows |
+| --- | --- | --- |
+| build | ⏭️ skipped | the release already exists in S3; nothing is rebuilt |
+| deploy-app | ✅ | `ParameterKey=AppVersion,ParameterValue=8b2567781f08` → `Modify` ×3 → `UPDATE_COMPLETE` |
+| smoke | ✅ | `ok running version (8b2567781f08)` |
+
+A rollback is one parameter: the stack says which release runs, and the release is still
+in S3 (ADR-0015, the lecturer's advice from the 02.11 defenses).
+
+### After the demos
+
+The app stack was deleted with `make down-app`; the network and artifacts stacks stay.
+
+## Notes
+
+- **Every commit on `main` is a release**, including a template-only or docs-only one, so
+  each push to `main` also restarts the app. Deliberate (the version names the commit), but
+  docs-only changes stay on the feature branch until there's code to ship with them.
+- **Deploys need fresh secrets**: the lab credentials expire with the 3-hour session.
