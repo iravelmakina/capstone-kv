@@ -4,9 +4,12 @@ How evenly the consistent hashing ring spreads keys, measured to choose the numb
 virtual nodes per shard. Test: `internal/ring/distribution_test.go`, run with
 `go test ./internal/ring/ -run TestDistribution -v` (2026-11-24, Go 1.24, xxHash64).
 
-**Setup:** 1,000,000 routing keys shaped like the benchmark's (table `usertable`,
-partition keys `user0` … `user999999`, so very similar strings: a hard case for a weak
-hash). Shard IDs are the ones the deployment uses: `shard-1` … `shard-5`.
+**Setup:** 1,000,000 routing keys in table `usertable` with sequential partition keys
+`user0` … `user999999`: very similar strings, a harder case for a weak hash than the
+benchmark's own keys (with `insertorder=hashed`, YCSB names records `user` + a hashed
+number). Shard IDs are the ones the deployment uses: `shard-1` … `shard-5`. The result
+holds for these IDs; M5, with other IDs, should check the worst case over many ID sets
+(AI review §4.11).
 "Deviation" is a shard's key count minus the mean, as a percentage of the mean.
 
 | Virtual nodes | Shards | Max deviation from mean | Std deviation |

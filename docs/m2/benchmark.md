@@ -56,27 +56,30 @@ Under 3% apart: the baseline is stable. **No failed requests** in any run (0 log
 
 | Instance | CPU avg / peak | CPU credit balance min | Surplus credits used |
 | --- | --- | --- | --- |
-| coordinator | 39% / 69% | **0** | 0.09 (≈ $0.004) |
+| coordinator | 39% / 69% | **0** | 0.09 (< $0.001) |
 | shard-1 | 15% / 28% | 15.2 | 0 |
 | shard-2 | 16% / 31% | 14.9 | 0 |
 | client | 30% / 56% | 8.4 | 0 |
 
 ## What the numbers say
 
-1. **Writes are limited by the disk, not the CPU.** A shard holds its write lock while
-   `fsync` waits for the EBS volume, so writes to one shard happen one at a time. In
+1. **Writes are limited by one lock held across `fsync`, not by the CPU or the volume's
+   capacity.** A shard holds its write lock while `fsync` waits for the EBS volume, so
+   writes to one shard happen one at a time: each waits for the previous one's round trip
+   to the disk, far below what the volume could do in parallel. In
    workload A, 902 updates/s over 2 shards is ~450 per shard per second, about 2.2 ms per
    `fsync`. With 8 of the 16 threads updating at once, each update waits behind the others:
    median 14.7 ms. In workload B only ~0.8 updates are in flight, so an update costs about
    one `fsync` plus two network hops: 4.0 ms. The shards' CPU stays near 15%.
 2. **Workload A's throughput is the write ceiling.** Reads aren't the limit (in B the same
    cluster serves 6,500 reads/s); A is capped because half of its operations queue for the
-   disk. More shards raise the ceiling linearly (M5); batching several writes into one
-   `fsync` (group commit) would raise it per shard.
+   disk. Batching several writes into one `fsync` (group commit) would raise it per shard,
+   and is the cheaper fix; more shards raise it linearly (M5).
 3. **The coordinator is the next bottleneck** (control question). It handles every request
    twice (client side and shard side), used up its CPU credits and drew on surplus ones.
-   With `standard` credits it would have been throttled halfway through. It is stateless
-   apart from the table registry, so it can be scaled out behind a load balancer.
+   With `standard` credits it would have been throttled halfway through. It is not
+   stateless: it holds the table registry and the shard membership in memory, and shards
+   heartbeat to its one address, so scaling it out first needs both in a shared place.
 4. **Why p99 is far above the average** (asked in the 20.11 defenses). In A, the average
    update is 15 ms but p99 is 33 ms: a request that arrives behind a full queue of writes on
    its shard waits for all of them. Reads in A have a p99 3× their median for the same
