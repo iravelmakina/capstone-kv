@@ -19,7 +19,8 @@ client ──HTTP──▶ coordinator ──▶ shard-1   (private subnet, AZ a
 
 - **API:** REST + JSON, [`api/openapi.yaml`](api/openapi.yaml): register a table (partition
   key, optional sort key), then CREATE (`PUT`), READ (`GET`), EXISTS (`HEAD`), DELETE on
-  `/v1/tables/{table}/items/{pk}[/{sk}]`.
+  `/v1/tables/{table}/items/{pk}[/{sk}]`. Coordinator–shard endpoints (registration,
+  storage) are in [`api/internal-openapi.yaml`](api/internal-openapi.yaml), not the public contract.
 - **Coordinator:** routes each item by `table + partition key` on a consistent hashing ring
   (xxHash64, 128 virtual nodes); shards register at start and send heartbeats.
 - **Shard:** keys in memory plus an append-only log on disk, replayed after a restart.
@@ -88,7 +89,11 @@ make down-app      # at the end of every lab session: instances cost money
 ```
 
 Rollback: run the **ci-cd** workflow by hand with an earlier release SHA, or
-`make up-app VERSION=<sha>`.
+`make up-app VERSION=<sha>` (then `make smoke-aws VERSION=<sha>`).
+
+The AMI is fixed per stack (ADR-0017): a new stack gets the current Amazon Linux 2023
+image, updates keep it. Upgrading replaces every instance and, in M2, the shards' data:
+`make up-app IMAGE_ID=ami-...`, only on purpose.
 
 ## Verify it
 
@@ -96,8 +101,8 @@ Rollback: run the **ci-cd** workflow by hand with an earlier release SHA, or
 | --- | --- |
 | Code and contract | `make test` (CI runs it on every push) |
 | Templates | `make lint`; `make verify` (no internet route in private subnets); `make drift` |
-| Deployed app | `make smoke-aws`: all four operations, and `/health` reports the deployed version |
-| Behaviour on failure | [`docs/m2/evidence/local-docker.txt`](docs/m2/evidence/local-docker.txt): shard restart replays its log; a stopped shard's keys answer 503, the rest keep working; coordinator restart waits for the shards |
+| Deployed app | `make smoke-aws`: the coordinator and every shard report the release that was meant to be deployed, then all four operations |
+| Behaviour on failure | [`docs/m2/evidence/local-docker.txt`](docs/m2/evidence/local-docker.txt): shard restart replays its log; a stopped shard's keys answer 503, the rest keep working; coordinator restart waits for the shards (`/health` is 503 until then). Damaged logs and failed writes: `go test ./internal/store/` (ADR-0018) |
 | Performance | `make up-app BENCH=true && make bench-aws && make down-app`, or the **benchmark** workflow |
 
 The scenarios each check must satisfy are in the

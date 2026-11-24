@@ -9,9 +9,16 @@
 //
 //	[1 byte op: 1=put, 2=delete][4 bytes key length][key][value]
 //
-// Integers are big-endian. Length and checksum let replay detect a record that was only
-// half written when the machine died: replay stops there and cuts the file back to the
-// last good record, so new appends never land after garbage.
+// Integers are big-endian. Length and checksum let replay find a damaged record. What
+// happens then depends on where it is (ADR-0018):
+//
+//   - at the end of the file (its header is cut short, or its declared end reaches the
+//     end of the file): a crash during an append. Replay keeps everything before it and
+//     cuts it off, so new appends never land after garbage;
+//   - followed by more bytes: damage in the middle, which a crash can't cause. Open fails
+//     and names the offset; a person decides. Acknowledged writes are never cut silently.
+//
+// A failed write is cut back the same way before Put/Delete return the error.
 package store
 
 import (
@@ -37,11 +44,29 @@ const (
 // castagnoli is CRC-32C, the checksum variant with hardware support on x86 and ARM.
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
+// ErrDamaged is returned by Open when the log is damaged somewhere other than its last
+// record (ADR-0018).
+var ErrDamaged = errors.New("log damaged in the middle")
+
+// logFile is what the store needs from the log file; *os.File has it. Tests swap in a
+// file that fails on purpose.
+type logFile interface {
+	io.Writer
+	io.Seeker
+	io.Closer
+	Sync() error
+	Truncate(size int64) error
+}
+
 // Store is a durable key-value map. Safe for concurrent use.
 type Store struct {
 	mu   sync.RWMutex
 	data map[string][]byte
-	f    *os.File
+	f    logFile
+	end  int64 // offset just after the last good record: where the next append goes
+	// broken is set when a failed write couldn't be cut back: from then on every write
+	// fails, so nothing is ever appended after garbage. Cleared only by a restart.
+	broken error
 }
 
 // Open loads (or creates) the log in dir and replays it into memory.
@@ -54,49 +79,75 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{data: map[string][]byte{}, f: f}
-	good, err := s.replay()
+	good, err := s.replay(f)
 	if err != nil {
-		f.Close()
+		f.Close() // nothing is cut: the file stays as it was for a person to look at
 		return nil, err
 	}
+	s.end = good
 	// Drop a torn tail (if any) and position the file for appends.
-	if err := f.Truncate(good); err != nil {
-		f.Close()
-		return nil, err
-	}
-	if _, err := f.Seek(good, io.SeekStart); err != nil {
+	if err := s.cutBack(); err != nil {
 		f.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// replay applies every intact record and returns the offset just after the last one.
-func (s *Store) replay() (int64, error) {
-	r := bufio.NewReader(s.f)
+// replay applies every intact record and returns the offset just after the last one. A
+// damaged record that isn't the last thing in the file is an error (ErrDamaged).
+func (s *Store) replay(f *os.File) (int64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	size := info.Size()
+	r := bufio.NewReader(f)
 	var offset int64
 	header := make([]byte, headerSize)
+
+	// damaged decides what a bad record at offset means, from where it says it ends.
+	damaged := func(n uint32, what string) (int64, error) {
+		end := offset + int64(headerSize) + int64(n)
+		if end >= size {
+			return offset, nil // the last record: torn by a crash, cut off by Open
+		}
+		return offset, fmt.Errorf("%w: %s: %s at offset %d, %d more bytes follow; "+
+			"restore the file, or truncate it at that offset by hand and accept the loss",
+			ErrDamaged, f.Name(), what, offset, size-end)
+	}
+
 	for {
 		if _, err := io.ReadFull(r, header); err != nil {
-			return offset, nil // clean end of file, or a header cut short: stop here
+			return offset, nil // clean end of file, or a header cut short: a torn tail
 		}
 		n := binary.BigEndian.Uint32(header[0:4])
 		sum := binary.BigEndian.Uint32(header[4:8])
 		if n < 5 || n > maxRecord {
-			return offset, nil // damaged length field
+			return damaged(n, "impossible record length")
 		}
 		payload := make([]byte, n)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return offset, nil // payload cut short
+			return offset, nil // payload cut short: runs past the end, a torn tail
 		}
 		if crc32.Checksum(payload, castagnoli) != sum {
-			return offset, nil // bytes damaged
+			return damaged(n, "checksum mismatch")
 		}
 		if err := s.apply(payload); err != nil {
-			return offset, nil
+			return damaged(n, err.Error())
 		}
 		offset += int64(headerSize) + int64(n)
 	}
+}
+
+// cutBack makes the file end at the last good record and positions it for the next append.
+func (s *Store) cutBack() error {
+	if err := s.f.Truncate(s.end); err != nil {
+		return err
+	}
+	if _, err := s.f.Seek(s.end, io.SeekStart); err != nil {
+		return err
+	}
+	return s.f.Sync()
 }
 
 // apply decodes one payload and changes the in-memory map.
@@ -134,11 +185,26 @@ func encode(op byte, key string, value []byte) []byte {
 
 // appendRecord writes a record and waits until the disk has it (fsync). Callers hold the
 // write lock, so log order always equals the order changes reach memory.
+//
+// If the write or the fsync fails, part of the record may already be in the file. It is
+// cut back to the last good record before the error is returned; otherwise the next
+// successful write would land after garbage and be lost at the next replay (ADR-0018).
 func (s *Store) appendRecord(rec []byte) error {
-	if _, err := s.f.Write(rec); err != nil {
-		return err
+	if s.broken != nil {
+		return s.broken
 	}
-	return s.f.Sync()
+	_, err := s.f.Write(rec)
+	if err == nil {
+		err = s.f.Sync()
+	}
+	if err == nil {
+		s.end += int64(len(rec))
+		return nil
+	}
+	if cerr := s.cutBack(); cerr != nil {
+		s.broken = fmt.Errorf("store stopped accepting writes: a write failed (%v) and the log could not be cut back (%v)", err, cerr)
+	}
+	return err
 }
 
 // Put stores value under key. It returns only after the change is on disk.

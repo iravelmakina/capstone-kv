@@ -62,11 +62,11 @@
 
 ## 10. Fixes from the AI design review (`docs/m2/ai-review.md`, verdicts agreed)
 
-- [ ] 10.1 `make diff`: only "no changes" counts as success; `smoke-aws` checks the version the job meant to deploy (CI passes it)
-- [ ] 10.2 ADR-0017: `ImageId` is a concrete AMI ID, looked up once on create and kept on update
-- [ ] 10.3 ADR-0018: store cuts the log back after a failed write; damage in the middle of the log stops the shard; tests
-- [ ] 10.4 Coordinator `/health` answers 503 until ready; OpenAPI and tests updated
-- [ ] 10.5 `ExpectedShards` parameter in `infra/app.yaml` (ADR-0014)
-- [ ] 10.6 `api/internal-openapi.yaml`: shard registration and the shards' key-value endpoints
-- [ ] 10.7 Wording: coordinator not stateless, single lock across `fsync`, ring key description, "for good" comment
+- [x] 10.1 `make diff`: only "no changes" counts as success; `smoke-aws` checks the version the job meant to deploy (CI passes it)
+- [x] 10.2 ADR-0017: `ImageId` is a concrete AMI ID, looked up once on create and kept on update
+- [x] 10.3 ADR-0018: store cuts the log back after a failed write; damage in the middle of the log stops the shard; tests
+- [x] 10.4 Coordinator `/health` answers 503 until ready; OpenAPI and tests updated
+- [x] 10.5 `ExpectedShards` parameter in `infra/app.yaml` (ADR-0014)
+- [x] 10.6 `api/internal-openapi.yaml`: shard registration and the shards' key-value endpoints
+- [x] 10.7 Wording: coordinator not stateless, single lock across `fsync`, ring key description, "for good" comment
 - [ ] 10.8 A green run of the benchmark workflow after the fixes

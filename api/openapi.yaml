@@ -13,11 +13,18 @@ servers:
 paths:
   /health:
     get:
-      summary: Node is up and can serve requests
+      summary: Whether the node can serve requests
       operationId: health
       responses:
         "200":
           description: Healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: >-
+            The coordinator can't serve yet: fewer shards have registered than it expects.
+            Same body as 200, with status "unavailable" and ready false.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
@@ -238,8 +245,17 @@ components:
       type: object
       required: [status, role, version]
       properties:
-        status: { type: string, enum: [ok] }
+        status: { type: string, enum: [ok, unavailable] }
         role: { type: string, enum: [coordinator, shard] }
+        ready:
+          type: boolean
+          description: Coordinator only. True once the expected number of shards has registered
+        shards:
+          type: integer
+          description: Coordinator only. Shards currently registered
+        keys:
+          type: integer
+          description: Shard only. Keys the shard holds
         version:
           type: string
           description: Commit SHA the running binary was built from ("dev" for local builds)

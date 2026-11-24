@@ -54,8 +54,10 @@ func (m *Membership) Register(id, address string) {
 	mem.lastSeen = m.now()
 }
 
-// Remove takes a shard off the ring for good. Its keys move to the next shards clockwise
-// (without their data, until M5's migration exists).
+// Remove takes a shard off the ring. Its keys move to the next shards clockwise (without
+// their data, until M5's migration exists). Not permanent: a shard that is still running
+// re-registers with its next heartbeat, so stop it first. Membership is in memory only; a
+// persisted ring with explicit join/leave is M5's design (AI review §1.1).
 func (m *Membership) Remove(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

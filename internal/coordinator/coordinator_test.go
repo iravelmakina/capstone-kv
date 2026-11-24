@@ -254,3 +254,12 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("health = %d %s", code, body)
 	}
 }
+
+// Spec "Coordinator not ready": 503 with the same body, ready false.
+func TestHealthNotReady(t *testing.T) {
+	c := newCluster(t, 2, false)
+	code, body := call(t, "GET", c.coord.URL+"/health", "")
+	if code != 503 || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"status":"unavailable"`) {
+		t.Fatalf("health = %d %s; want 503 with ready false", code, body)
+	}
+}

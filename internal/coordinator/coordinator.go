@@ -81,10 +81,17 @@ func (c *Coordinator) Handler() http.Handler {
 	return mux
 }
 
+// health answers 200 only when the coordinator can serve requests, i.e. the expected
+// shards have registered; before that 503, so a load balancer or a script checking only
+// the status code doesn't send traffic too early. The body has the same fields either way.
 func (c *Coordinator) health(w http.ResponseWriter, r *http.Request) {
 	ready, n := c.members.Ready()
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"status": "ok", "role": "coordinator", "version": buildinfo.Version, "ready": ready, "shards": n,
+	code, status := http.StatusOK, "ok"
+	if !ready {
+		code, status = http.StatusServiceUnavailable, "unavailable"
+	}
+	httpx.WriteJSON(w, code, map[string]any{
+		"status": status, "role": "coordinator", "version": buildinfo.Version, "ready": ready, "shards": n,
 	})
 }
 

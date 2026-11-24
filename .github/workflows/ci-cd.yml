@@ -128,5 +128,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: create table, put, read, exists, delete
-        run: make smoke-aws
+      # VERSION = the release this run deployed (the rollback input, else this commit),
+      # so a deploy that changed nothing can't pass by reporting the old version.
+      - name: every node runs the release; create table, put, read, exists, delete
+        run: make smoke-aws ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION}

@@ -24,9 +24,20 @@ Parameters:
     Default: t3.small
     AllowedValues: [t3.small, t3.medium]   # the lab denies anything bigger (M1 evidence 39-40)
   ImageId:
-    # Latest Amazon Linux 2023 AMI, looked up at deploy time from AWS's public parameter.
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    # A concrete AMI ID, not "latest" (ADR-0017): an SSM-typed parameter is resolved again
+    # on every update, and a new AMI would replace every instance and wipe the shards' logs.
+    # `make up-app` looks the current AL2023 ID up once when the stack is created and keeps
+    # it on updates; an upgrade is deliberate (IMAGE_ID=ami-...).
+    Type: AWS::EC2::Image::Id
+    Description: Amazon Linux 2023 AMI ID, fixed for the stack's lifetime (ADR-0017)
+  ExpectedShards:
+    # The coordinator answers 503 until this many shards have registered (ADR-0013). It
+    # must match the shard instances below; lower only to test a start with a shard missing.
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 2
+    Description: Shards the coordinator waits for before serving (the template runs 2)
   BenchmarkClient:
     Type: String
     Description: "true while benchmarking: adds the YCSB client instance (ADR-0016)"
@@ -113,7 +124,7 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
             aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
-            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} coordinator 2
+            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} coordinator ${ExpectedShards}
             --//--
           - Bucket: !ImportValue
               Fn::Sub: ${ArtifactsStack}-BucketName

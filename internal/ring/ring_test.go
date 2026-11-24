@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// testKeys returns n routing keys shaped like the benchmark's: table "usertable" and
-// partition keys "user<number>".
+// testKeys returns n routing keys in table "usertable" with sequential partition keys
+// "user0", "user1", ...: very similar strings, a harder case for the hash than the
+// benchmark's own keys (YCSB with insertorder=hashed uses "user" + a hashed number).
 func testKeys(n int) [][]byte {
 	keys := make([][]byte, n)
 	for i := range keys {

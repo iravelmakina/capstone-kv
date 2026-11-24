@@ -47,10 +47,15 @@ diff:            ## show what a deploy would change
 	  --template-body file://$(TEMPLATE) $(if $(strip $(PARAMS)),--parameters $(PARAMS),) \
 	  --tags Key=Project,Value=capstone-kv >/dev/null; \
 	if ! $(CFN) wait change-set-create-complete --stack-name $(STACK) --change-set-name $$cs 2>/dev/null; then \
-	  $(CFN) describe-change-set --stack-name $(STACK) --change-set-name $$cs --query StatusReason --output text; \
+	  reason=$$($(CFN) describe-change-set --stack-name $(STACK) --change-set-name $$cs --query StatusReason --output text); \
+	  echo "$$reason"; \
 	  $(CFN) delete-change-set --stack-name $(STACK) --change-set-name $$cs; \
 	  if [ $$type = CREATE ]; then $(CFN) delete-stack --stack-name $(STACK); fi; \
-	  rm -f .last-change-set; exit 0; \
+	  rm -f .last-change-set; \
+	  case "$$reason" in \
+	    *"didn't contain changes"*|*"No updates are to be performed"*) echo "no changes"; exit 0;; \
+	    *) echo "FAIL: the change set could not be created"; exit 1;; \
+	  esac; \
 	fi; \
 	$(CFN) describe-change-set --stack-name $(STACK) --change-set-name $$cs \
 	  --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' --output table; \
@@ -146,12 +151,24 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
 BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
+EXPECTED_SHARDS ?= 2
+# The AMI is pinned per stack (ADR-0017). IMAGE_ID=ami-... upgrades it deliberately (the
+# change set then shows every instance being replaced); otherwise a new stack gets the
+# current Amazon Linux 2023 ID once, and an existing stack keeps the one it has.
+IMAGE_ID ?=
+AMI_PARAMETER := /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 up-app:          ## deploy the app stack running VERSION (BENCH=true adds the client)
-	@$(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null || \
-	  { echo "release $(VERSION) not in S3: run make release"; exit 1; }
+	@set -euo pipefail; \
+	$(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null || \
+	  { echo "release $(VERSION) not in S3: run make release"; exit 1; }; \
+	status=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE); \
+	if [ -n "$(IMAGE_ID)" ]; then image="ParameterKey=ImageId,ParameterValue=$(IMAGE_ID)"; \
+	elif [ "$$status" != NONE ] && [ "$$status" != REVIEW_IN_PROGRESS ]; then image="ParameterKey=ImageId,UsePreviousValue=true"; \
+	else image="ParameterKey=ImageId,ParameterValue=$$($(AWS) ssm get-parameter --name $(AMI_PARAMETER) --query Parameter.Value --output text)"; fi; \
+	echo "AMI: $$image"; \
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH))"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) $$image"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
@@ -162,11 +179,14 @@ down-app:        ## delete the app stack (end of every lab session: it costs mon
 # smoke-aws: run scripts/smoke.sh ON the coordinator through SSM Run Command, against
 # localhost. Nothing has to be opened to the internet (the CI runner's address is unknown),
 # and it tests the deployed release, not the laptop's copy of the script (ADR-0015).
-smoke-aws:       ## smoke test on the coordinator via SSM (works from CI and laptop)
+# It checks VERSION, the release this run meant to deploy (CI passes the rollback version
+# when there is one), never the version the stack reports: after a deploy that silently
+# did nothing, the stack still reports the old version and the check would pass.
+smoke-aws:       ## smoke test on the coordinator via SSM: every node must run VERSION
 	@set -euo pipefail; \
 	id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='CoordinatorInstanceId'].OutputValue" --output text); \
-	ver=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='AppVersion'].OutputValue" --output text); \
-	echo "coordinator $$id, release $$ver: waiting for the SSM agent"; \
+	ver=$(VERSION); \
+	echo "coordinator $$id, expected release $$ver: waiting for the SSM agent"; \
 	for i in $$(seq 30); do \
 	  [ "$$($(AWS) ssm describe-instance-information --filters Key=InstanceIds,Values=$$id --query 'InstanceInformationList[0].PingStatus' --output text)" = Online ] && break; \
 	  sleep 10; done; \

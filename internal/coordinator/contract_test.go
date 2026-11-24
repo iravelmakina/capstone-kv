@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/iravelmakina/capstone-kv/internal/shard"
 )
 
 // TestContract checks the coordinator against api/openapi.yaml (spec "Contract test"):
@@ -31,6 +33,7 @@ func TestContract(t *testing.T) {
 	type step struct{ op, method, url, body string }
 	steps := []step{
 		{"health", "GET", r + "/health", ""},
+		{"health", "GET", n + "/health", ""}, // 503 until the shards have registered
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`},
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`}, // 409
 		{"createTable", "POST", r + "/v1/tables", `{"name":""}`},                          // 400
@@ -86,7 +89,9 @@ func TestContract(t *testing.T) {
 		if !codes[code] {
 			t.Errorf("%s %s -> %d, not documented for %s (documented: %v)", s.method, s.url, code, s.op, keys(codes))
 		}
-		if code >= 400 && s.method != "HEAD" {
+		// Error bodies follow the Error schema; HEAD has no body, and a 503 from /health
+		// is a Health body (documented that way).
+		if code >= 400 && s.method != "HEAD" && s.op != "health" {
 			var e struct {
 				Error string `json:"error"`
 			}
@@ -152,4 +157,69 @@ func keys(m map[int]bool) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// TestInternalContract does the same for api/internal-openapi.yaml: the coordinator's
+// membership endpoints and a shard's key-value endpoints (spec task 10.6). Every operation
+// must be exercised and every returned status documented.
+func TestInternalContract(t *testing.T) {
+	documented := loadOperations(t, "../../api/internal-openapi.yaml")
+	c := newCluster(t, 2, true)
+	co, sh := c.coord.URL, c.shards["shard-1"].URL
+	key := sh + shard.KeyPath(shard.StorageKey("users", "u1", ""))
+	missing := sh + shard.KeyPath(shard.StorageKey("users", "nope", ""))
+	badKey := sh + "/internal/v1/kv/not*base64"
+	big := `{"a":"` + strings.Repeat("x", 1<<20) + `"}`
+
+	type step struct {
+		op, method, url, body string
+		errorBody             bool // the response must be {"error": ...}
+	}
+	steps := []step{
+		{"registerShard", "POST", co + "/internal/v1/shards", `{"id":"shard-1","address":"` + sh + `"}`, false},
+		{"registerShard", "POST", co + "/internal/v1/shards", `{"id":"bad id"}`, true}, // 400
+		{"listShards", "GET", co + "/internal/v1/shards", "", false},
+
+		{"shardPut", "PUT", key, `{"name":"Ira"}`, false},
+		{"shardPut", "PUT", badKey, `{"a":1}`, true}, // 400
+		{"shardPut", "PUT", key, big, true},          // 413
+		{"shardGet", "GET", key, "", false},
+		{"shardGet", "GET", missing, "", false}, // 404, no body
+		{"shardGet", "GET", badKey, "", true},   // 400
+		{"shardExists", "HEAD", key, "", false},
+		{"shardExists", "HEAD", missing, "", false},
+		{"shardExists", "HEAD", badKey, "", false},
+		{"shardDelete", "DELETE", key, "", false},
+		{"shardDelete", "DELETE", key, "", false}, // 404, nothing written
+		{"shardDelete", "DELETE", badKey, "", true},
+
+		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", false},
+		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", true}, // 404
+	}
+
+	exercised := map[string]bool{}
+	for _, s := range steps {
+		codes, ok := documented[s.op]
+		if !ok {
+			t.Fatalf("step uses %q, which isn't in internal-openapi.yaml", s.op)
+		}
+		exercised[s.op] = true
+		code, body := call(t, s.method, s.url, s.body)
+		if !codes[code] {
+			t.Errorf("%s %s -> %d, not documented for %s (documented: %v)", s.method, s.url, code, s.op, keys(codes))
+		}
+		if s.errorBody {
+			var e struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal([]byte(body), &e) != nil || e.Error == "" {
+				t.Errorf("%s %s -> %d with body %q, want {\"error\": ...}", s.method, s.url, code, body)
+			}
+		}
+	}
+	for op := range documented {
+		if !exercised[op] {
+			t.Errorf("operation %s is in internal-openapi.yaml but not exercised by this test", op)
+		}
+	}
 }

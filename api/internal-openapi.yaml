@@ -1,0 +1,176 @@
+openapi: 3.1.0
+info:
+  title: capstone-kv internal API
+  version: "1.0"
+  description: >-
+    Endpoints between the coordinator and the shards (ADR-0010, ADR-0013). Not part of the
+    public contract (api/openapi.yaml): clients never call them, they can change with any
+    release, and the shards' security group lets only the coordinator reach a shard
+    (ADR-0014). Shard registration has no authentication in M2: the coordinator's port is
+    reachable only from inside the VPC and the allowed client range. A separate admin port
+    and a persisted ring are M5's design (AI review §1.1).
+
+servers:
+  - url: http://localhost:8080
+    description: coordinator (registration endpoints) or a shard (key-value endpoints)
+
+paths:
+  # --- On the coordinator: shard membership --------------------------------------------
+  /internal/v1/shards:
+    post:
+      summary: Register a shard, or heartbeat
+      description: >-
+        Every shard calls this at start and then every 5 seconds. An unknown ID is added to
+        the ring; a known one has its address and last-seen time updated. A shard silent for
+        15 seconds is marked unavailable (its keys answer 503) but stays on the ring.
+      operationId: registerShard
+      tags: [coordinator]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Registration" }
+      responses:
+        "200":
+          description: Registered (or heartbeat recorded)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [registered]
+                properties:
+                  registered: { type: string, description: the shard ID }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      summary: List the shards on the ring
+      operationId: listShards
+      tags: [coordinator]
+      responses:
+        "200":
+          description: Every shard the coordinator knows, sorted by ID
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ShardStatus" }
+
+  /internal/v1/shards/{id}:
+    delete:
+      summary: Take a shard off the ring
+      description: >-
+        Its keys move to the next shards clockwise, without their data (no migration in
+        M2). Not permanent: if the shard is still running, its next heartbeat adds it back,
+        so stop the shard first. Membership lives in the coordinator's memory only.
+      operationId: removeShard
+      tags: [coordinator]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- On a shard: key-value storage ----------------------------------------------------
+  /internal/v1/kv/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        description: >-
+          The storage key, base64url without padding. Decoded, it is table, partition key
+          and sort key joined by zero bytes (the sort key is empty for tables without one).
+          The shard treats it as opaque bytes.
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
+    put:
+      summary: Store a value (create or replace)
+      description: Returns only after the record is in the shard's log on disk (fsync).
+      operationId: shardPut
+      tags: [shard]
+      requestBody:
+        required: true
+        description: The item's JSON as the coordinator received it, stored as bytes (at most 1 MiB)
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: Stored and on disk }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413":
+          description: Value larger than 1 MiB
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/WriteFailed" }
+    get:
+      summary: Read a value
+      operationId: shardGet
+      tags: [shard]
+      responses:
+        "200":
+          description: The stored value, byte for byte
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: No such key (no body) }
+    head:
+      summary: Check that a key exists
+      operationId: shardExists
+      tags: [shard]
+      responses:
+        "200": { description: Exists }
+        "400": { description: Key is not base64url }
+        "404": { description: No such key }
+    delete:
+      summary: Delete a key
+      operationId: shardDelete
+      tags: [shard]
+      responses:
+        "204": { description: Deleted and on disk }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: No such key (nothing written) }
+        "500": { $ref: "#/components/responses/WriteFailed" }
+
+components:
+  schemas:
+    Registration:
+      type: object
+      required: [id, address]
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,128}$"
+          description: Stable across restarts; decides the shard's points on the ring
+        address:
+          type: string
+          description: Base URL the coordinator calls, e.g. http://10.20.64.12:8080
+    ShardStatus:
+      type: object
+      required: [id, address, available, silentFor]
+      properties:
+        id: { type: string }
+        address: { type: string }
+        available: { type: boolean, description: false after 15 s without a heartbeat }
+        silentFor: { type: string, description: time since the last heartbeat, e.g. "3s" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+  responses:
+    BadRequest:
+      description: Malformed request (bad JSON, bad ID or address, key not base64url)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such shard
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    WriteFailed:
+      description: >-
+        The log write failed. The log was cut back to the last good record, or, if that
+        failed too, the shard refuses all writes until restarted (ADR-0018).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
