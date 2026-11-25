@@ -44,7 +44,7 @@
 
 ## 6. Infrastructure
 
-- [ ] 6.1 `infra/app.yaml`: 3 shard instances in the 3 AZs, two replica containers each on different ports; shard security group allows its own members and the coordinator; `cfn-lint` passes
+- [x] 6.1 `infra/app.yaml`: 3 shard instances in the 3 AZs, two replica containers each on different ports; shard security group allows its own members and the coordinator; `cfn-lint` passes
 - [ ] 6.2 First M3 deploy (author approves each write call): all 5 instances healthy; placement and security groups checked; `make down-app` afterwards
 - [ ] 6.3 Evidence in `docs/m3/evidence/aws-deploy.txt`
 

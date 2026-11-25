@@ -161,6 +161,7 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 
 BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
 EXPECTED_SHARDS ?= 2
+W ?= 2           # write quorum (ADR-0021): 2, or 1 for the benchmark's W = 1 run
 # The AMI is pinned per stack (ADR-0017). IMAGE_ID=ami-... upgrades it deliberately (the
 # change set then shows every instance being replaced); otherwise a new stack gets the
 # current Amazon Linux 2023 ID once, and an existing stack keeps the one it has.
@@ -177,7 +178,7 @@ up-app:          ## deploy the app stack running VERSION (BENCH=true adds the cl
 	else image="ParameterKey=ImageId,ParameterValue=$$($(AWS) ssm get-parameter --name $(AMI_PARAMETER) --query Parameter.Value --output text)"; fi; \
 	echo "AMI: $$image"; \
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) $$image"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
