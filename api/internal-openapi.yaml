@@ -81,8 +81,11 @@ paths:
           The shard treats it as opaque bytes.
         schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
     put:
-      summary: Store a value (create or replace)
-      description: Returns only after the record is in the shard's log on disk (fsync).
+      summary: Store a value (create or replace) — on the leader only
+      description: >-
+        The leader appends the record to its log and flushes it, then waits until W
+        replicas have it on disk (itself and, with W = 2, one follower) before answering
+        and before the value becomes readable (ADR-0021, ADR-0023).
       operationId: shardPut
       tags: [shard]
       requestBody:
@@ -92,8 +95,10 @@ paths:
           application/json:
             schema: { type: object }
       responses:
-        "200": { description: Stored and on disk }
+        "200": { description: Committed (on W replicas' disks) }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/NotLeader" }
+        "504": { $ref: "#/components/responses/NotCommitted" }
         "413":
           description: Value larger than 1 MiB
           content:
@@ -101,17 +106,27 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/WriteFailed" }
     get:
-      summary: Read a value
+      summary: Read a value, with its version
+      description: Any replica answers reads; the coordinator compares versions (ADR-0021).
       operationId: shardGet
       tags: [shard]
       responses:
         "200":
           description: The stored value, byte for byte
+          headers:
+            X-KV-Epoch: { $ref: "#/components/headers/VersionEpoch" }
+            X-KV-LSN: { $ref: "#/components/headers/VersionLSN" }
           content:
             application/json:
               schema: { type: object }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { description: No such key (no body) }
+        "404":
+          description: >-
+            No such key (no body). With version headers it's a tombstone: deleted at that
+            version; without them the key was never written here.
+          headers:
+            X-KV-Epoch: { $ref: "#/components/headers/VersionEpoch" }
+            X-KV-LSN: { $ref: "#/components/headers/VersionLSN" }
     head:
       summary: Check that a key exists
       operationId: shardExists
@@ -121,14 +136,46 @@ paths:
         "400": { description: Key is not base64url }
         "404": { description: No such key }
     delete:
-      summary: Delete a key
+      summary: Delete a key — on the leader only (leaves a tombstone)
       operationId: shardDelete
       tags: [shard]
       responses:
-        "204": { description: Deleted and on disk }
+        "204": { description: Deleted, committed like a put }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: No such key (nothing written) }
+        "409": { $ref: "#/components/responses/NotLeader" }
+        "504": { $ref: "#/components/responses/NotCommitted" }
         "500": { $ref: "#/components/responses/WriteFailed" }
+
+  /internal/v1/log:
+    get:
+      summary: Pull the leader's log (followers call this)
+      description: >-
+        The follower sends the epoch, LSN and hash of its last durable record (ADR-0023).
+        If that record isn't in the leader's log, the answer is empty with X-KV-Truncate-To:
+        cut back to that LSN and ask again. Otherwise the LSN counts as the follower's ack,
+        and the answer is up to `max` records after it, raw as in the log (ADR-0022); if
+        there are none, the leader holds the request up to 5 s and then answers empty.
+      operationId: shardLog
+      tags: [shard]
+      parameters:
+        - { name: replica, in: query, required: true, schema: { type: string }, description: the follower's replica ID }
+        - { name: epoch, in: query, required: true, schema: { type: integer, minimum: 0 }, description: epoch of its last record }
+        - { name: lsn, in: query, required: true, schema: { type: integer, minimum: 0 }, description: LSN of its last record (its ack) }
+        - { name: hash, in: query, required: true, schema: { type: string, pattern: "^[0-9a-f]{1,16}$" }, description: xxhash64 of its last record, hex }
+        - { name: max, in: query, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Records (possibly none), or an instruction to cut back
+          headers:
+            X-KV-Epoch: { description: the leader's epoch, schema: { type: integer } }
+            X-KV-Last: { description: the leader's last LSN, schema: { type: integer } }
+            X-KV-Truncate-To: { description: "present only when the follower must cut its log back to this LSN", schema: { type: integer } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/NotLeader" }
 
 components:
   schemas:
@@ -156,7 +203,22 @@ components:
       required: [error]
       properties:
         error: { type: string }
+  headers:
+    VersionEpoch: { description: "the key's version: epoch", schema: { type: integer } }
+    VersionLSN: { description: "the key's version: LSN", schema: { type: integer } }
   responses:
+    NotLeader:
+      description: This replica isn't the leader of the current epoch
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotCommitted:
+      description: >-
+        No follower had the write within the commit timeout (2 s). It is in the leader's
+        log and may still become visible: outcome unknown (ADR-0021).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadRequest:
       description: Malformed request (bad JSON, bad ID or address, key not base64url)
       content:

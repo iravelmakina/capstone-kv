@@ -192,6 +192,8 @@ func TestInternalContract(t *testing.T) {
 		{"shardDelete", "DELETE", key, "", false},
 		{"shardDelete", "DELETE", key, "", false}, // 404, nothing written
 		{"shardDelete", "DELETE", badKey, "", true},
+		{"shardLog", "GET", sh + "/internal/v1/log?replica=x&epoch=0&lsn=0&hash=0&max=10", "", false},
+		{"shardLog", "GET", sh + "/internal/v1/log?replica=x&lsn=nope", "", true}, // 400
 
 		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", false},
 		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", true}, // 404

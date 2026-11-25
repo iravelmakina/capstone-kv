@@ -19,14 +19,14 @@
 
 ## 3. Replication on the shard
 
-- [ ] 3.1 Role and epoch from the coordinator's heartbeat answer; 409 for writes and pulls when not the current leader
-- [ ] 3.2 Leader: `GET /internal/v1/log` with a 5 s long-poll; follower's durable LSN from its pull position; answer "cut back to LSN n" when the follower's last record isn't in the log
-- [ ] 3.3 Follower: pull loop with a 7 s deadline, verify checksum and hash link, append + fsync, apply in order, truncate when told; resync from its last record after a restart
-- [ ] 3.4 Leader: commit wait for one follower (W = 2) or none (W = 1), apply after commit, "not committed" after 2 s
-- [ ] 3.5 Reads return the value with its version, or a tombstone with its version
-- [ ] 3.6 Health endpoint: role, epoch, last LSN, lag, commit-wait time
-- [ ] 3.7 `make rebuild-replica`: wipe a replica's data and let it resync
-- [ ] 3.8 `api/internal-openapi.yaml` updated; internal contract test passes
+- [x] 3.1 Role and epoch from the coordinator's heartbeat answer; 409 for writes and pulls when not the current leader
+- [x] 3.2 Leader: `GET /internal/v1/log` with a 5 s long-poll; follower's durable LSN from its pull position; answer "cut back to LSN n" when the follower's last record isn't in the log
+- [x] 3.3 Follower: pull loop with a 7 s deadline, verify checksum and hash link, append + fsync, apply in order, truncate when told; resync from its last record after a restart
+- [x] 3.4 Leader: commit wait for one follower (W = 2) or none (W = 1), apply after commit, "not committed" after 2 s
+- [x] 3.5 Reads return the value with its version, or a tombstone with its version
+- [x] 3.6 Health endpoint: role, epoch, last LSN, lag, commit-wait time
+- [ ] 3.7 `make rebuild-replica`: wipe a replica's data and let it resync (built with the compose file, group 5)
+- [x] 3.8 `api/internal-openapi.yaml` updated; internal contract test passes
 
 ## 4. Coordinator
 

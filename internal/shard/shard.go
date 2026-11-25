@@ -1,6 +1,6 @@
-// Package shard is the storage node: it keeps keys in a store and serves them to the
-// coordinator over internal endpoints, and it registers itself with the coordinator at
-// start and every few seconds after that (ADR-0013).
+// Package shard is the storage node: one replica of a shard's replica set (ADR-0020). It
+// keeps keys in a store, serves them to the coordinator over internal endpoints, ships its
+// log to followers when it leads, and reports to the coordinator every few seconds.
 //
 // The shard knows nothing about tables or key shapes: the coordinator sends it one opaque
 // storage key per item. Only the coordinator is allowed to reach it (security group,
@@ -12,12 +12,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
@@ -37,62 +35,10 @@ func KeyPath(storageKey string) string {
 	return "/internal/v1/kv/" + base64.RawURLEncoding.EncodeToString([]byte(storageKey))
 }
 
-// Handler returns the shard's HTTP routes, backed by st.
+// Handler returns the routes of a replica set of one, backed by st: the M2 shard, kept
+// for running without replication (and for the coordinator's tests until M3's group 4).
 func Handler(st *store.Store) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "role": "shard", "version": buildinfo.Version, "keys": st.Len()})
-	})
-	// A "GET" pattern also matches HEAD requests; the handler tells them apart.
-	mux.HandleFunc("GET /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		v, found := st.Get(key)
-		if !found {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK) // EXISTS: status only, no body
-			return
-		}
-		w.Write(v)
-	})
-	mux.HandleFunc("PUT /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxValue))
-		if err != nil {
-			httpx.WriteError(w, http.StatusRequestEntityTooLarge, "value larger than 1 MiB")
-			return
-		}
-		if err := st.Put(key, body); err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "write failed: "+err.Error())
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("DELETE /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		existed, err := st.Delete(key)
-		switch {
-		case err != nil:
-			httpx.WriteError(w, http.StatusInternalServerError, "delete failed: "+err.Error())
-		case !existed:
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	})
-	return mux
+	return NewStandalone(st).Handler()
 }
 
 func decodeKey(w http.ResponseWriter, r *http.Request) (string, bool) {
