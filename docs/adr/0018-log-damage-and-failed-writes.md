@@ -3,6 +3,7 @@
 - Status: **Accepted** — 2026-11-24 by Iryna Velmakina (author). Drafted with Claude Code from the AI design review verdicts (`docs/m2/ai-review.md`, §1.2, §2.3) agreed in chat.
 - Date: 2026-11-24
 - Supersedes: in ADR-0013, the replay rule "replay stops at the first bad one" (Risks table). The rest of ADR-0013 stands.
+- Deferred items settled by ADR-0022: header checksum and replica re-sync done in M3; group commit moved to M5.
 
 ## Context
 
