@@ -122,6 +122,7 @@ components:
           "400": { $ref: "#/components/responses/BadRequest" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
+          "504": { $ref: "#/components/responses/NotCommitted" }
       get:
         summary: READ — get an item
         operationId: getItem
@@ -150,6 +151,7 @@ components:
           "400": { $ref: "#/components/responses/BadRequest" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
+          "504": { $ref: "#/components/responses/NotCommitted" }
     ItemByFullKey:
       parameters:
         - $ref: "#/components/parameters/Table"
@@ -168,6 +170,7 @@ components:
           "400": { $ref: "#/components/responses/BadRequest" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
+          "504": { $ref: "#/components/responses/NotCommitted" }
       get:
         summary: READ — get an item
         operationId: getItemWithSortKey
@@ -196,8 +199,17 @@ components:
           "400": { $ref: "#/components/responses/BadRequest" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
+          "504": { $ref: "#/components/responses/NotCommitted" }
 
   responses:
+    NotCommitted:
+      description: >-
+        The write reached the shard's leader but no other replica confirmed it within 2 s.
+        It may still take effect: the outcome is unknown, not failed (ADR-0021). Retrying
+        the same write is possible but can overwrite someone else's newer write.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadRequest:
       description: Invalid input, e.g. a missing sort key on a table that has one
       content:
@@ -249,10 +261,20 @@ components:
         role: { type: string, enum: [coordinator, shard] }
         ready:
           type: boolean
-          description: Coordinator only. True once the expected number of shards has registered
+          description: Coordinator only. True once the expected shards have registered and each has a leader
         shards:
           type: integer
           description: Coordinator only. Shards currently registered
+        failures:
+          type: object
+          description: >-
+            Coordinator only. Per shard, item requests answered 503 (no live leader or too
+            few replicas) and writes answered 504 (not committed in time) since start
+          additionalProperties:
+            type: object
+            properties:
+              unavailable503: { type: integer }
+              notCommitted504: { type: integer }
         keys:
           type: integer
           description: Shard only. Keys the shard holds

@@ -165,7 +165,9 @@ func keys(m map[int]bool) []int {
 func TestInternalContract(t *testing.T) {
 	documented := loadOperations(t, "../../api/internal-openapi.yaml")
 	c := newCluster(t, 2, true)
-	co, sh := c.coord.URL, c.shards["shard-1"].URL
+	leader := c.leaderOf(t, "shard-1")
+	co, sh := c.coord.URL, leader.srv.URL
+	follower := c.nodes[c.others(leader.id)[0]].srv.URL
 	key := sh + shard.KeyPath(shard.StorageKey("users", "u1", ""))
 	missing := sh + shard.KeyPath(shard.StorageKey("users", "nope", ""))
 	badKey := sh + "/internal/v1/kv/not*base64"
@@ -176,8 +178,8 @@ func TestInternalContract(t *testing.T) {
 		errorBody             bool // the response must be {"error": ...}
 	}
 	steps := []step{
-		{"registerShard", "POST", co + "/internal/v1/shards", `{"id":"shard-1","address":"` + sh + `"}`, false},
-		{"registerShard", "POST", co + "/internal/v1/shards", `{"id":"bad id"}`, true}, // 400
+		{"replicaHeartbeat", "POST", co + "/internal/v1/replicas", `{"shard":"shard-1","replica":"` + leader.id + `","address":"` + sh + `","epoch":1,"last":{"epoch":0,"lsn":0}}`, false},
+		{"replicaHeartbeat", "POST", co + "/internal/v1/replicas", `{"shard":"bad id"}`, true}, // 400
 		{"listShards", "GET", co + "/internal/v1/shards", "", false},
 
 		{"shardPut", "PUT", key, `{"name":"Ira"}`, false},
@@ -193,7 +195,9 @@ func TestInternalContract(t *testing.T) {
 		{"shardDelete", "DELETE", key, "", false}, // 404, nothing written
 		{"shardDelete", "DELETE", badKey, "", true},
 		{"shardLog", "GET", sh + "/internal/v1/log?replica=x&epoch=0&lsn=0&hash=0&max=10", "", false},
-		{"shardLog", "GET", sh + "/internal/v1/log?replica=x&lsn=nope", "", true}, // 400
+		{"shardLog", "GET", sh + "/internal/v1/log?replica=x&lsn=nope", "", true},                           // 400
+		{"shardLog", "GET", follower + "/internal/v1/log?replica=x&epoch=0&lsn=0&hash=0&max=10", "", true},  // 409
+		{"shardPut", "PUT", follower + shard.KeyPath(shard.StorageKey("users", "u2", "")), `{"a":1}`, true}, // 409
 
 		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", false},
 		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", true}, // 404

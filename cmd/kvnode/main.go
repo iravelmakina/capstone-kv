@@ -1,12 +1,12 @@
-// Command kvnode runs one node of capstone-kv: the coordinator or a shard (ADR-0009).
-// One binary, one Docker image; the role comes from a flag or an environment variable,
-// so the same image runs everywhere and only its configuration differs.
+// Command kvnode runs one node of capstone-kv: the coordinator or a shard replica
+// (ADR-0009, ADR-0020). One binary, one Docker image; the role comes from a flag or an
+// environment variable, so the same image runs everywhere and only its configuration differs.
 //
-//	kvnode --role=coordinator --expected-shards=2
-//	kvnode --role=shard --id=shard-1 --coordinator=http://10.20.0.10:8080 --advertise=http://10.20.64.11:8080
+//	kvnode --role=coordinator --expected-shards=2 --leaders=shard-1=1a,shard-2=2b
+//	kvnode --role=shard --shard=shard-1 --replica=1a --coordinator=http://10.20.0.10:8080 --advertise=http://10.20.64.11:8081
 //
-// Every flag can also be set as KV_<NAME> (e.g. KV_ROLE, KV_SHARD_ID), which is how the
-// container gets its settings.
+// Every flag can also be set as KV_<NAME> (e.g. KV_ROLE, KV_SHARD, KV_REPLICA), which is
+// how the container gets its settings.
 package main
 
 import (
@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,17 +56,25 @@ func main() {
 	listen := flag.String("listen", env("KV_LISTEN", ":8080"), "address to serve HTTP on")
 	dataDir := flag.String("data-dir", env("KV_DATA_DIR", "/data"), "directory for the append-only log")
 
-	// Coordinator settings.
-	expected := flag.Int("expected-shards", envInt("KV_EXPECTED_SHARDS", 2), "shards to wait for before serving items")
-	vnodes := flag.Int("vnodes", envInt("KV_VNODES", ring.DefaultVirtualNodes), "virtual nodes per shard (ADR-0011)")
-	timeout := flag.Duration("heartbeat-timeout", envDuration("KV_HEARTBEAT_TIMEOUT", 15*time.Second), "silence after which a shard is unavailable")
+	w := flag.Int("w", envInt("KV_W", 2), "replicas a write needs before it commits: 1 or 2 (ADR-0021)")
 
-	// Shard settings.
-	id := flag.String("id", env("KV_SHARD_ID", ""), "stable shard ID, e.g. shard-1")
+	// Coordinator settings.
+	expected := flag.Int("expected-shards", envInt("KV_EXPECTED_SHARDS", 2), "replica sets to wait for before serving items")
+	replicas := flag.Int("replicas", envInt("KV_REPLICAS", 3), "replicas per shard, N")
+	leaders := flag.String("leaders", env("KV_LEADERS", ""), "first leader per shard, e.g. shard-1=1a,shard-2=2b")
+	vnodes := flag.Int("vnodes", envInt("KV_VNODES", ring.DefaultVirtualNodes), "virtual nodes per shard (ADR-0011)")
+	timeout := flag.Duration("heartbeat-timeout", envDuration("KV_HEARTBEAT_TIMEOUT", 15*time.Second), "silence after which a replica is unavailable")
+
+	// Replica settings.
+	shardID := flag.String("shard", env("KV_SHARD", ""), "replica set this replica belongs to, e.g. shard-1")
+	replicaID := flag.String("replica", env("KV_REPLICA", ""), "stable replica ID, e.g. 1a")
 	coordURL := flag.String("coordinator", env("KV_COORDINATOR_URL", ""), "coordinator base URL")
-	advertise := flag.String("advertise", env("KV_ADVERTISE_URL", ""), "base URL the coordinator should call this shard on")
-	interval := flag.Duration("heartbeat-interval", envDuration("KV_HEARTBEAT_INTERVAL", 5*time.Second), "how often to re-register")
+	advertise := flag.String("advertise", env("KV_ADVERTISE_URL", ""), "base URL the coordinator and other replicas call this replica on")
+	interval := flag.Duration("heartbeat-interval", envDuration("KV_HEARTBEAT_INTERVAL", 5*time.Second), "how often to report to the coordinator")
 	flag.Parse()
+	if *w != 1 && *w != 2 {
+		log.Fatal("--w must be 1 or 2")
+	}
 
 	// Stop cleanly on Ctrl-C or `docker stop` (SIGTERM): finish requests, close the log.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -79,23 +88,40 @@ func main() {
 		if err != nil {
 			log.Fatalf("open table registry: %v", err)
 		}
-		closeStore = tables.Close
-		members := coordinator.NewMembership(ring.New(*vnodes), *timeout, *expected)
-		handler = coordinator.New(tables, members).Handler()
-		log.Printf("coordinator: expecting %d shards, %d virtual nodes each", *expected, *vnodes)
+		leaderStore, err := store.Open(filepath.Join(*dataDir, "leaders"))
+		if err != nil {
+			log.Fatalf("open leader assignments: %v", err)
+		}
+		closeStore = func() error { leaderStore.Close(); return tables.Close() }
+		members, err := coordinator.NewMembership(ring.New(*vnodes), coordinator.MembershipConfig{
+			Timeout: *timeout, ExpectedShards: *expected, Replicas: *replicas,
+			Leaders: leaderStore, Preferred: parsePairs(*leaders),
+		})
+		if err != nil {
+			log.Fatalf("load leader assignments: %v", err)
+		}
+		go members.Watch(ctx, time.Second)
+		// R + W > N: with W = 2 two replicas answer each read, with W = 1 all of them (ADR-0021).
+		r := *replicas + 1 - *w
+		handler = coordinator.New(tables, members, r).Handler()
+		log.Printf("coordinator: %d shards × %d replicas, W=%d R=%d, %d virtual nodes", *expected, *replicas, *w, r, *vnodes)
 
 	case "shard":
-		if *id == "" || *coordURL == "" || *advertise == "" {
-			log.Fatal("shard needs --id, --coordinator and --advertise")
+		if *shardID == "" || *replicaID == "" || *coordURL == "" || *advertise == "" {
+			log.Fatal("shard needs --shard, --replica, --coordinator and --advertise")
 		}
 		st, err := store.Open(filepath.Join(*dataDir, "shard"))
 		if err != nil {
 			log.Fatalf("open store: %v", err)
 		}
 		closeStore = st.Close
-		handler = shard.Handler(st)
-		go shard.RegisterLoop(ctx, *coordURL, shard.Registration{ID: *id, Address: *advertise}, *interval)
-		log.Printf("shard %s: %d keys replayed, registering with %s as %s", *id, st.Len(), *coordURL, *advertise)
+		rep := shard.NewReplica(st, shard.Config{Shard: *shardID, Replica: *replicaID, W: *w})
+		handler = rep.Handler()
+		go rep.Run(ctx)
+		go rep.HeartbeatLoop(ctx, *coordURL, *advertise, *interval)
+		last, _ := st.Last()
+		log.Printf("%s/%s: %d keys replayed up to LSN %d, reporting to %s as %s",
+			*shardID, *replicaID, st.Len(), last.LSN, *coordURL, *advertise)
 
 	default:
 		log.Fatal("--role must be coordinator or shard")
@@ -115,4 +141,15 @@ func main() {
 	if err := closeStore(); err != nil {
 		log.Printf("close store: %v", err)
 	}
+}
+
+// parsePairs reads "a=b,c=d" into a map.
+func parsePairs(s string) map[string]string {
+	m := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
+			m[k] = v
+		}
+	}
+	return m
 }

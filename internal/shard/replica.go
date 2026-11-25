@@ -28,6 +28,9 @@ const (
 	HeaderTruncateTo = "X-KV-Truncate-To" // "cut your log back to this LSN" (ADR-0023 step 5)
 )
 
+// errNotLeader: the replica asked for the log isn't the current leader.
+var errNotLeader = errors.New("not the leader")
+
 // Config is one replica's identity and replication settings (ADR-0021, ADR-0023).
 type Config struct {
 	Shard         string        // replica set, e.g. "shard-1"
@@ -78,7 +81,7 @@ type Replica struct {
 	changed    chan struct{}     // closed and replaced on every change (record, ack, role)
 	waits      latencies         // leader: commit-wait times
 
-	onPull func(replica string, lsn uint64) // tests: called on every pull the leader serves
+	onPull func(replica string, lsn uint64) // tests: called on every pull the leader serves; guarded by mu
 }
 
 // NewReplica wraps an opened store. Until SetRole names a leader it accepts no writes.
@@ -333,9 +336,10 @@ func (r *Replica) serveLog(w http.ResponseWriter, req *http.Request) {
 			r.advanceCommitLocked(lsn) // one follower is enough for W = 2 (ADR-0021)
 		}
 	}
+	hook := r.onPull
 	r.mu.Unlock()
-	if r.onPull != nil {
-		r.onPull(follower, lsn)
+	if hook != nil {
+		hook(follower, lsn)
 	}
 
 	wait := time.NewTimer(r.cfg.LongPoll)
@@ -399,9 +403,16 @@ func (r *Replica) Run(ctx context.Context) {
 			continue
 		}
 		if err := r.pullOnce(ctx, addr); err != nil && ctx.Err() == nil {
-			log.Printf("replica %s: pull from %s: %v", r.cfg.Replica, addr, err)
+			// 409: the replica we were told leads doesn't know it yet, or no longer does.
+			// Leadership is changing, so ask again soon; other errors wait longer.
+			wait := 500 * time.Millisecond
+			if errors.Is(err, errNotLeader) {
+				wait = 50 * time.Millisecond
+			} else {
+				log.Printf("replica %s: pull from %s: %v", r.cfg.Replica, addr, err)
+			}
 			select {
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(wait):
 			case <-ctx.Done():
 			}
 		}
@@ -426,6 +437,9 @@ func (r *Replica) pullOnce(ctx context.Context, addr string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return errNotLeader
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}

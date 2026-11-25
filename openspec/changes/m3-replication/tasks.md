@@ -30,12 +30,12 @@
 
 ## 4. Coordinator
 
-- [ ] 4.1 Membership per replica; leader and epoch per shard persisted in the coordinator's log; serve a shard once its leader is known and 2 of 3 replicas are live
-- [ ] 4.2 Writes to the leader only; 503 without a leader; 504 when the leader reports "not committed"
-- [ ] 4.3 Reads and exists: R rotating live replicas in parallel, newest `(epoch, LSN)` wins, 503 below R live
-- [ ] 4.4 Automatic promotion: after 3 missed heartbeats ask both followers (1 s each), promote the higher `(epoch, LSN)` under epoch + 1, persist, announce; none if a follower doesn't answer
-- [ ] 4.5 W/R setting (`W=2,R=2` default, `W=1,R=3`); 503/504 counts on the health endpoint
-- [ ] 4.6 `api/openapi.yaml`: 504 on writes; public contract test passes
+- [x] 4.1 Membership per replica; leader and epoch per shard persisted in the coordinator's log; serve a shard once its leader is known and 2 of 3 replicas are live
+- [x] 4.2 Writes to the leader only; 503 without a leader; 504 when the leader reports "not committed"
+- [x] 4.3 Reads and exists: R rotating live replicas in parallel, newest `(epoch, LSN)` wins, 503 below R live
+- [x] 4.4 Automatic promotion: after 3 missed heartbeats ask both followers (1 s each), promote the higher `(epoch, LSN)` under epoch + 1, persist, announce; none if a follower doesn't answer
+- [x] 4.5 W/R setting (`W=2,R=2` default, `W=1,R=3`); 503/504 counts on the health endpoint
+- [x] 4.6 `api/openapi.yaml`: 504 on writes; public contract test passes
 
 ## 5. Local run
 

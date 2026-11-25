@@ -1,6 +1,8 @@
 package coordinator
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,11 +16,22 @@ import (
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
 
-// cluster is a coordinator and n shards running in-process, wired like the deployment.
+// node is one shard replica running in-process.
+type node struct {
+	shard, id string
+	r         *shard.Replica
+	srv       *httptest.Server
+	cancel    context.CancelFunc
+}
+
+// cluster is a coordinator and n shards of 3 replicas each, running in-process and wired
+// like the deployment. Heartbeats are sent by beat(), not by timers, so tests control them.
 type cluster struct {
 	coord   *httptest.Server
 	members *Membership
-	shards  map[string]*httptest.Server // shard ID -> server
+	leaders *store.Store
+	nodes   map[string]*node // replica ID ("1a", "2c", ...) -> node
+	shards  int
 }
 
 func openStore(t *testing.T) *store.Store {
@@ -31,31 +44,109 @@ func openStore(t *testing.T) *store.Store {
 	return st
 }
 
-// newCluster starts a coordinator expecting n shards and, if register is true, n shards
-// that have registered once.
+// newCluster starts a coordinator expecting n shards and their 3n replicas; if register
+// is true, every replica has reported in and knows its role.
 func newCluster(t *testing.T, n int, register bool) *cluster {
 	t.Helper()
-	members := NewMembership(ring.New(ring.DefaultVirtualNodes), 15*time.Second, n)
-	coord := httptest.NewServer(New(openStore(t), members).Handler())
-	t.Cleanup(coord.Close)
-	c := &cluster{coord: coord, members: members, shards: map[string]*httptest.Server{}}
-	if register {
-		for i := 1; i <= n; i++ {
-			c.addShard(t, fmt.Sprintf("shard-%d", i))
+	c := &cluster{nodes: map[string]*node{}, shards: n, leaders: openStore(t)}
+	c.startCoordinator(t)
+	for s := 1; s <= n; s++ {
+		for _, letter := range []string{"a", "b", "c"} {
+			c.startNode(t, fmt.Sprintf("shard-%d", s), fmt.Sprintf("%d%s", s, letter))
 		}
+	}
+	if register {
+		c.beat(t)
 	}
 	return c
 }
 
-func (c *cluster) addShard(t *testing.T, id string) {
+func (c *cluster) startCoordinator(t *testing.T) {
 	t.Helper()
-	srv := httptest.NewServer(shard.Handler(openStore(t)))
-	t.Cleanup(srv.Close)
-	c.shards[id] = srv
-	code, _ := call(t, "POST", c.coord.URL+"/internal/v1/shards", fmt.Sprintf(`{"id":%q,"address":%q}`, id, srv.URL))
-	if code != 200 {
-		t.Fatalf("register %s = %d", id, code)
+	members, err := NewMembership(ring.New(ring.DefaultVirtualNodes), MembershipConfig{
+		Timeout: 15 * time.Second, ExpectedShards: c.shards, Replicas: 3, Leaders: c.leaders,
+		AskTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+	c.members = members
+	c.coord = httptest.NewServer(New(openStore(t), members, 2).Handler())
+	t.Cleanup(c.coord.Close)
+}
+
+func (c *cluster) startNode(t *testing.T, shardID, id string) *node {
+	t.Helper()
+	r := shard.NewReplica(openStore(t), shard.Config{Shard: shardID, Replica: id, W: 2,
+		CommitTimeout: time.Second, LongPoll: 200 * time.Millisecond, PullDeadline: time.Second})
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &node{shard: shardID, id: id, r: r, srv: httptest.NewServer(r.Handler()), cancel: cancel}
+	go r.Run(ctx)
+	t.Cleanup(n.stop)
+	c.nodes[id] = n
+	return n
+}
+
+func (n *node) stop() {
+	n.cancel()
+	n.srv.CloseClientConnections()
+	n.srv.Close()
+}
+
+// beat sends one heartbeat for each named replica (all if none) and applies the answer,
+// twice, so that replicas that reported before their set had a leader learn it too.
+func (c *cluster) beat(t *testing.T, ids ...string) {
+	t.Helper()
+	if len(ids) == 0 {
+		for id := range c.nodes {
+			ids = append(ids, id)
+		}
+	}
+	for round := 0; round < 2; round++ {
+		for _, id := range ids {
+			n := c.nodes[id]
+			s := n.r.Status()
+			hb, _ := json.Marshal(shard.Heartbeat{Shard: n.shard, Replica: id, Address: n.srv.URL, Epoch: s.Epoch, Last: s.Last})
+			code, body := call(t, "POST", c.coord.URL+"/internal/v1/replicas", string(hb))
+			if code != 200 {
+				t.Fatalf("heartbeat %s = %d %s", id, code, body)
+			}
+			var a shard.HeartbeatAnswer
+			json.Unmarshal([]byte(body), &a)
+			n.r.SetRole(a.Epoch, a.Leader, a.LeaderAddress)
+		}
+	}
+}
+
+// others returns every replica of the cluster except the given one.
+func (c *cluster) others(except string) []string {
+	var ids []string
+	for id := range c.nodes {
+		if id != except {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// leaderOf returns the node leading a shard.
+func (c *cluster) leaderOf(t *testing.T, shardID string) *node {
+	t.Helper()
+	for _, s := range c.members.Status() {
+		if s.ID == shardID {
+			return c.nodes[s.Leader]
+		}
+	}
+	t.Fatalf("no leader for %s", shardID)
+	return nil
+}
+
+// later moves the coordinator's clock forward, as if time passed without heartbeats.
+func (c *cluster) later(d time.Duration) {
+	at := time.Now().Add(d)
+	c.members.mu.Lock()
+	c.members.now = func() time.Time { return at }
+	c.members.mu.Unlock()
 }
 
 func call(t *testing.T, method, url, body string) (int, string) {
@@ -148,9 +239,8 @@ func TestSortKeyDoesNotChangeShard(t *testing.T) {
 		call(t, "PUT", fmt.Sprintf("%s/v1/tables/orders/items/c7/o%d", c.coord.URL, i), `{"n":1}`)
 	}
 	holding := 0
-	for _, srv := range c.shards {
-		_, body := call(t, "GET", srv.URL+"/health", "")
-		if !strings.Contains(body, `"keys":0`) {
+	for _, s := range []string{"shard-1", "shard-2"} {
+		if c.leaderOf(t, s).r.Status().Keys > 0 {
 			holding++
 		}
 	}
@@ -166,14 +256,15 @@ func TestKeysSpreadOverShards(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		call(t, "PUT", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), `{"n":1}`)
 	}
-	for id, srv := range c.shards {
-		if _, body := call(t, "GET", srv.URL+"/health", ""); strings.Contains(body, `"keys":0`) {
-			t.Fatalf("%s holds no keys", id)
+	for _, s := range []string{"shard-1", "shard-2"} {
+		if c.leaderOf(t, s).r.Status().Keys == 0 {
+			t.Fatalf("%s holds no keys", s)
 		}
 	}
 }
 
-// Spec "Coordinator restart": item requests get 503 until the expected shards registered.
+// Spec "Coordinator restart" (M2) and "One replica missing at start": item requests get
+// 503 until every expected shard has a leader, which needs 2 of its 3 replicas.
 func TestNotReadyUntilShardsRegister(t *testing.T) {
 	c := newCluster(t, 2, false)
 	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`) // works without shards
@@ -181,60 +272,174 @@ func TestNotReadyUntilShardsRegister(t *testing.T) {
 
 	code, body := call(t, "GET", url, "")
 	expect(t, code, body, 503)
-	c.addShard(t, "shard-1")
+	c.beat(t, "1a", "1b", "1c")
 	code, body = call(t, "GET", url, "")
-	expect(t, code, body, 503) // one of two
-	c.addShard(t, "shard-2")
+	expect(t, code, body, 503) // one of two shards
+	c.beat(t, "2a")            // one replica isn't a majority: no leader yet
+	code, body = call(t, "GET", url, "")
+	expect(t, code, body, 503)
+	c.beat(t, "2a", "2b") // 2c stays down
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 404) // ready: the item just doesn't exist
-}
-
-// Spec "Shard down": a silent shard stays on the ring; its keys get 503, others still work.
-func TestSilentShardAnswers503OnlyForItsKeys(t *testing.T) {
-	c := newCluster(t, 2, true)
-	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
-
-	// Let time pass: shard-1 keeps sending heartbeats, shard-2 has gone silent.
-	later := time.Now().Add(20 * time.Second)
-	c.members.now = func() time.Time { return later }
-	c.members.Register("shard-1", c.shards["shard-1"].URL)
-
-	var ok, unavailable int
-	for i := 0; i < 50; i++ {
-		code, _ := call(t, "PUT", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), `{"n":1}`)
-		switch code {
-		case 200:
-			ok++
-		case 503:
-			unavailable++
-		default:
-			t.Fatalf("unexpected status %d", code)
-		}
-	}
-	if ok == 0 || unavailable == 0 {
-		t.Fatalf("ok=%d unavailable=%d: want both, keys of the live shard work and of the silent one get 503", ok, unavailable)
-	}
-	_, list := call(t, "GET", c.coord.URL+"/internal/v1/shards", "")
-	if !strings.Contains(list, `"id":"shard-2","address"`) || !strings.Contains(list, `"available":false`) {
-		t.Fatalf("silent shard should be listed as unavailable: %s", list)
+	for i := 0; i < 20; i++ {  // keys of both shards can be written with 2c missing
+		code, body = call(t, "PUT", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), `{"v":1}`)
+		expect(t, code, body, 200)
 	}
 }
 
-// A shard that is alive by heartbeat but doesn't answer also yields 503, not 404.
-func TestUnreachableShardIs503(t *testing.T) {
-	c := newCluster(t, 2, true)
+// Spec "Leader down": its shard's writes get 503, reads still work from the followers.
+func TestLeaderDownWritesFailReadsWork(t *testing.T) {
+	c := newCluster(t, 1, true)
 	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
-	c.shards["shard-2"].Close()
-	saw503 := false
-	for i := 0; i < 50 && !saw503; i++ {
-		code, _ := call(t, "GET", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), "")
-		if code != 404 && code != 503 {
-			t.Fatalf("status %d", code)
-		}
-		saw503 = code == 503
+	url := c.coord.URL + "/v1/tables/users/items/u1"
+	code, body := call(t, "PUT", url, `{"v":1}`)
+	expect(t, code, body, 200)
+
+	leader := c.leaderOf(t, "shard-1")
+	leader.stop()
+	c.later(20 * time.Second)
+	c.beat(t, c.others(leader.id)...)
+
+	code, body = call(t, "PUT", url, `{"v":2}`)
+	expect(t, code, body, 503)
+	code, body = call(t, "GET", url, "")
+	if code != 200 || body != `{"v":1}` {
+		t.Fatalf("read with the leader down = %d %q", code, body)
 	}
-	if !saw503 {
-		t.Fatal("no key reached the closed shard")
+	if s := c.members.Status()[0]; s.Unavailable != 1 {
+		t.Fatalf("503 count = %d", s.Unavailable)
+	}
+}
+
+// A leader that is alive by heartbeat but doesn't answer: writes 503, reads still work.
+func TestUnreachableLeader(t *testing.T) {
+	c := newCluster(t, 1, true)
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	url := c.coord.URL + "/v1/tables/users/items/u1"
+	code, body := call(t, "PUT", url, `{"v":1}`)
+	expect(t, code, body, 200)
+	c.leaderOf(t, "shard-1").stop()
+	code, body = call(t, "PUT", url, `{"v":2}`)
+	expect(t, code, body, 503)
+	for i := 0; i < 6; i++ { // every rotation, also those that start at the dead leader
+		if code, body := call(t, "GET", url, ""); code != 200 {
+			t.Fatalf("read %d = %d %s", i, code, body)
+		}
+	}
+}
+
+// Spec "Read after write": a committed put is read back with any one replica stopped.
+func TestReadAfterWriteWithAnyReplicaDown(t *testing.T) {
+	for _, down := range []string{"1a", "1b", "1c"} {
+		t.Run(down, func(t *testing.T) {
+			c := newCluster(t, 1, true)
+			call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+			url := c.coord.URL + "/v1/tables/users/items/u1"
+			call(t, "PUT", url, `{"v":1}`)
+			code, body := call(t, "PUT", url, `{"v":2}`)
+			expect(t, code, body, 200)
+			c.nodes[down].stop()
+			for i := 0; i < 6; i++ {
+				if code, body := call(t, "GET", url, ""); code != 200 || body != `{"v":2}` {
+					t.Fatalf("read %d with %s down = %d %q", i, down, code, body)
+				}
+			}
+		})
+	}
+}
+
+// Spec "Both followers down": the write is answered 504 and counted.
+func TestBothFollowersDownIs504(t *testing.T) {
+	c := newCluster(t, 1, true)
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	leader := c.leaderOf(t, "shard-1")
+	for _, id := range c.others(leader.id) {
+		c.nodes[id].stop()
+	}
+	code, body := call(t, "PUT", c.coord.URL+"/v1/tables/users/items/u1", `{"v":1}`)
+	expect(t, code, body, 504)
+	if s := c.members.Status()[0]; s.NotCommitted != 1 {
+		t.Fatalf("504 count = %d", s.NotCommitted)
+	}
+	if _, health := call(t, "GET", c.coord.URL+"/health", ""); !strings.Contains(health, `"notCommitted504":1`) {
+		t.Fatalf("504 count missing from health: %s", health)
+	}
+}
+
+// Spec "Two replicas down": reads 503.
+func TestTwoReplicasDownReadsFail(t *testing.T) {
+	c := newCluster(t, 1, true)
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	c.nodes["1b"].stop()
+	c.nodes["1c"].stop()
+	code, body := call(t, "GET", c.coord.URL+"/v1/tables/users/items/u1", "")
+	expect(t, code, body, 503)
+}
+
+// Spec "Leader replaced": with both followers live, the newer one becomes leader under a
+// higher epoch, and committed writes survive.
+func TestAutomaticPromotion(t *testing.T) {
+	c := newCluster(t, 1, true)
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	for i := 0; i < 10; i++ {
+		code, body := call(t, "PUT", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), `{"v":1}`)
+		expect(t, code, body, 200)
+	}
+	old := c.leaderOf(t, "shard-1")
+	old.stop()
+	c.later(20 * time.Second)
+	followers := c.others(old.id)
+	c.beat(t, followers...)
+	c.members.CheckLeaders(context.Background())
+	c.beat(t, followers...) // they learn the new epoch
+
+	s := c.members.Status()[0]
+	if s.Epoch != 2 || s.Leader == old.id {
+		t.Fatalf("after promotion: epoch %d leader %s", s.Epoch, s.Leader)
+	}
+	code, body := call(t, "PUT", c.coord.URL+"/v1/tables/users/items/new", `{"v":2}`)
+	expect(t, code, body, 200)
+	for i := 0; i < 10; i++ {
+		code, body := call(t, "GET", fmt.Sprintf("%s/v1/tables/users/items/u%d", c.coord.URL, i), "")
+		if code != 200 {
+			t.Fatalf("committed u%d lost after promotion: %d %s", i, code, body)
+		}
+	}
+}
+
+// Spec "Only one follower live": no promotion, writes 503.
+func TestNoPromotionWithOneFollower(t *testing.T) {
+	c := newCluster(t, 1, true)
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	old := c.leaderOf(t, "shard-1")
+	old.stop()
+	followers := c.others(old.id)
+	c.nodes[followers[1]].stop()
+	c.later(20 * time.Second)
+	c.beat(t, followers[0])
+	c.members.CheckLeaders(context.Background())
+	if s := c.members.Status()[0]; s.Epoch != 1 || s.Leader != old.id {
+		t.Fatalf("promoted with one follower: epoch %d leader %s", s.Epoch, s.Leader)
+	}
+	code, body := call(t, "PUT", c.coord.URL+"/v1/tables/users/items/u1", `{"v":1}`)
+	expect(t, code, body, 503)
+}
+
+// Spec "Coordinator restart keeps the leader": the assignment is read back from disk.
+func TestCoordinatorRestartKeepsLeader(t *testing.T) {
+	c := newCluster(t, 1, true)
+	old := c.leaderOf(t, "shard-1")
+	old.stop()
+	c.later(20 * time.Second)
+	followers := c.others(old.id)
+	c.beat(t, followers...)
+	c.members.CheckLeaders(context.Background())
+	promoted := c.members.Status()[0]
+
+	c.startCoordinator(t) // a new coordinator over the same leader store
+	c.beat(t, followers...)
+	if s := c.members.Status()[0]; s.Leader != promoted.Leader || s.Epoch != promoted.Epoch {
+		t.Fatalf("after restart: %s/%d, want %s/%d", s.Leader, s.Epoch, promoted.Leader, promoted.Epoch)
 	}
 }
 

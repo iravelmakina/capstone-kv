@@ -184,6 +184,7 @@ func TestFollowerRestartResyncsOnlyTheGap(t *testing.T) {
 
 	var mu sync.Mutex
 	var first *uint64
+	a.r.mu.Lock()
 	a.r.onPull = func(replica string, lsn uint64) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -191,6 +192,7 @@ func TestFollowerRestartResyncsOnlyTheGap(t *testing.T) {
 			first = &lsn
 		}
 	}
+	a.r.mu.Unlock()
 	b = b.restart(t)
 	lead(1, a, b)
 	eventually(t, "b to catch up after its restart", func() bool { return lastLSN(b) == lastLSN(a) })
