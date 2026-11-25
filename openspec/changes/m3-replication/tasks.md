@@ -8,14 +8,14 @@
 - [x] 1.2 AI design review of the M3 spec and ADRs 0020–0023 from a fresh session; transcript and verdicts in `docs/m3/ai-review.md`; ADRs, design and specs revised per the agreed verdicts
 - [x] 1.3 Author reviews proposal, design, specs and ADRs 0020–0023; sets them to `Accepted` in chat
 - [x] 1.4 `openspec validate m3-replication --strict` passes
-- [ ] 1.5 Spec-only commit (no code, no templates); push `m3-replication`
+- [x] 1.5 Spec-only commit (no code, no templates); push `m3-replication`
 
 ## 2. Store
 
-- [ ] 2.1 New record format (ADR-0022): format version, epoch, LSN, previous hash, checksum over the whole record; M2 damage rules unchanged
-- [ ] 2.2 Versions `(epoch, LSN)` and tombstones in memory; last record after replay
-- [ ] 2.3 Read the records after a position; truncate back to an LSN
-- [ ] 2.4 Tests: consecutive LSNs, tombstone survives restart, duplicate skipped, broken hash link detected, truncation, torn tail still handled
+- [x] 2.1 New record format (ADR-0022): format version, epoch, LSN, previous hash, checksum over the whole record; M2 damage rules unchanged
+- [x] 2.2 Versions `(epoch, LSN)` and tombstones in memory; last record after replay
+- [x] 2.3 Read the records after a position; truncate back to an LSN
+- [x] 2.4 Tests: consecutive LSNs, tombstone survives restart, duplicate skipped, broken hash link detected, truncation, torn tail still handled
 
 ## 3. Replication on the shard
 
