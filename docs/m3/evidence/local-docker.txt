@@ -1,0 +1,112 @@
+Local cluster in Docker: coordinator + 2 shards × 3 replicas (r1a..r2c) from one image
+(docker-compose.yml), W = 2, R = 2. 2026-11-25, Docker 28.4.0, image capstone-kv:local
+(8.93MB), code at 3d9820d plus the uncommitted group-5 changes.
+
+Run:  docker compose down -v && make local-up && scripts/failure-tests.sh
+Every check prints ok or FAIL; the script stops at the first FAIL. Sections map to the
+scenarios of openspec/changes/m3-replication/specs/{replication,quorum-reads}.
+
+===== [M3-L0] what the first runs found and fixed =====
+1. First leader not the preferred one. Replicas 1b and 1c reported before 1a, formed a
+   majority, and 1b became shard-1's first leader although KV_LEADERS names 1a (ADR-0020:
+   the two shards' first leaders on different nodes). Fix: a set gets its first leader once
+   all its replicas have reported, or once a majority has waited one timeout (15 s), so a
+   dead replica can't block a start.
+2. Ready before the leader knew. /health said ready as soon as the coordinator had picked
+   a leader, but the leader learns it only from its next heartbeat answer (up to 5 s); until
+   then it refused writes (409 -> 503). Fix: ready requires each leader to have confirmed its
+   epoch in a heartbeat.
+3. (script) The 504 scenario first used a key that hashes to shard-2, where all replicas
+   were up, so the put committed. Fixed by using a known shard-1 key.
+Both code fixes have unit tests (TestFirstLeaderChoice, TestNotReadyUntilShardsRegister).
+
+===== [M3-L1] cluster ready: two replica sets, first leaders 1a and 2b, epoch 1 =====
+ok   coordinator ready
+{"id":"shard-1","epoch":1,"leader":"1a","live":["1a","1b","1c"]}
+{"id":"shard-2","epoch":1,"leader":"2b","live":["2a","2b","2c"]}
+ok   shard-1 leader (1a)
+ok   shard-2 leader (2b)
+
+===== [M3-L2] 200 puts reach every replica (spec: Follower stays current) =====
+ok   200 puts (shard-1 got 107, shard-2 got 93)
+ok   1b and 1c at the leader's LSN
+ok   2a and 2c at the leader's LSN
+{"replica":"1a","role":"leader","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"1b","role":"follower","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"1c","role":"follower","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"2a","role":"follower","epoch":1,"last":93,"lag":0,"keys":93}
+{"replica":"2b","role":"leader","epoch":1,"last":93,"lag":0,"keys":93}
+{"replica":"2c","role":"follower","epoch":1,"last":93,"lag":0,"keys":93}
+
+===== [M3-L3] reads spread over all replicas (spec: Balanced reads, R = 2) =====
+3000 reads of k1 -> replica reads: 1a=2000 1b=2000 1c=2000 (want 1800-2200 each)
+ok   balanced
+
+===== [M3-L4] a follower stops and restarts (specs: One follower down, Follower restarts behind) =====
+$ docker compose stop r1b
+ok   put with 1b down (200)
+ok   read k1 with 1b down (200)
+ok   read k2 with 1b down (200)
+ok   read k3 with 1b down (200)
+ok   read k4 with 1b down (200)
+ok   read k5 with 1b down (200)
+leader 1a now at LSN 157; 1b stopped behind it
+$ docker compose start r1b
+ok   1b caught up with the leader
+     r1b-1  | 2026/11/25 21:02:46 shard-1/1b: 107 keys replayed up to LSN 107, reporting to http://coordinator:8080 as http://r1b:8080
+{"replica":"1b","role":"follower","last":157,"lag":0}
+
+===== [M3-L5] both followers down (spec: Both followers down; Two replicas down) =====
+k2 holds {"round":2,"i":1}
+$ docker compose stop r1b r1c
+put took 2s
+ok   put with both followers down (504)
+ok   read with two replicas down (503)
+{"shard-1":{"notCommitted504":1,"unavailable503":1},"shard-2":{"notCommitted504":0,"unavailable503":0}}
+ok   the leader still shows the committed value ({"round":2,"i":1})
+
+===== [M3-L6] leader replaced; the former leader drops its uncommitted write (specs: Leader replaced, Former leader returns) =====
+$ docker compose stop r1a
+$ docker compose start r1b r1c
+waiting for 1a to be detected as dead (15 s) and a follower promoted...
+ok   shard-1 promoted to epoch 2
+new leader of shard-1: 1b
+ok   put on the new leader
+ok   committed k1 survived (200)
+ok   committed k2 survived (200)
+ok   committed k3 survived (200)
+ok   committed k4 survived (200)
+ok   committed k5 survived (200)
+ok   the 504 put never appeared ({"round":2,"i":1})
+$ docker compose start r1a
+ok   1a back as a follower at the new leader's LSN
+     r1a-1  | 2026/11/25 21:03:11 replica 1a: log disagrees with the leader after LSN 157; cutting back
+{"replica":"1a","role":"follower","epoch":2,"leader":"1b","last":{"epoch":2,"lsn":158}}
+
+===== [M3-L7] leader and one follower down: no promotion (spec: Only one follower live) =====
+$ docker compose stop r2b r2c
+ok   shard-2 still epoch 1 (1)
+ok   shard-2 leader unchanged (2b)
+ok   put to shard-2 (503)
+ok   read from shard-2 (1 replica live) (503)
+ok   shard-1 unaffected (200)
+$ docker compose start r2b r2c
+ok   shard-2 writable again
+
+===== [M3-L8] coordinator restart keeps leaders and epochs (spec: Coordinator restart keeps the leader) =====
+$ docker compose restart coordinator
+ok   coordinator ready again
+before: [{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}]
+after:  [{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}]
+ok   same leaders and epochs ([{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}])
+
+===== [M3-L9] rebuild a replica from the leader (spec: Rebuild) =====
+$ make rebuild-replica R=1c
+ok   1c rebuilt and caught up
+     r1c-1  | 2026/11/25 21:03:45 shard-1/1c: 0 keys replayed up to LSN 0, reporting to http://coordinator:8080 as http://r1c:8080
+{"replica":"1c","role":"follower","last":158,"keys":108}
+
+===== [M3-L10] smoke test after all of it =====
+smoke test passed against http://localhost:8080
+
+all failure tests passed

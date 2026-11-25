@@ -39,6 +39,7 @@ type Membership struct {
 }
 
 type replicaSet struct {
+	firstSeen    time.Time // when its first replica reported (start of the first-leader wait)
 	leader       string
 	epoch        uint64
 	replicas     map[string]*replicaInfo
@@ -86,7 +87,7 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 func (m *Membership) setLocked(id string) *replicaSet {
 	set, ok := m.shards[id]
 	if !ok {
-		set = &replicaSet{replicas: map[string]*replicaInfo{}}
+		set = &replicaSet{replicas: map[string]*replicaInfo{}, firstSeen: m.now()}
 		m.shards[id] = set
 		m.ring.Add(id)
 	}
@@ -98,7 +99,8 @@ func (m *Membership) liveLocked(info *replicaInfo) bool {
 }
 
 // Heartbeat records a replica's report and answers with its set's epoch and leader. A
-// set without a leader gets its first one once a majority of its replicas has reported.
+// set without a leader gets its first one once all its replicas have reported, or once a
+// majority has and the set has waited one timeout for the rest.
 func (m *Membership) Heartbeat(hb shard.Heartbeat) (shard.HeartbeatAnswer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -120,9 +122,12 @@ func (m *Membership) answerLocked(set *replicaSet) shard.HeartbeatAnswer {
 	return a
 }
 
-// assignFirstLeaderLocked picks the first leader of a set: among the live replicas, once
-// they are a majority, the one with the newest last record (it has everything any other
-// has); on a tie, the preferred replica, then the lowest ID. Callers hold m.mu.
+// assignFirstLeaderLocked picks the first leader of a set: among the live replicas, the
+// one with the newest last record (it has everything any other has); on a tie, the
+// preferred replica, then the lowest ID. It waits for all replicas, so the preferred one
+// gets the chance to lead (ADR-0020: the two shards' leaders on different nodes), but not
+// longer than one timeout once a majority is there, so a dead replica can't block a start.
+// Callers hold m.mu.
 func (m *Membership) assignFirstLeaderLocked(id string, set *replicaSet) error {
 	type cand struct {
 		id   string
@@ -136,8 +141,9 @@ func (m *Membership) assignFirstLeaderLocked(id string, set *replicaSet) error {
 			maxEpoch = max(maxEpoch, info.epoch, info.last.Epoch)
 		}
 	}
-	if len(cands) <= m.cfg.Replicas/2 {
-		return nil // not a majority yet
+	waited := m.now().Sub(set.firstSeen) > m.cfg.Timeout
+	if len(cands) < m.cfg.Replicas && (len(cands) <= m.cfg.Replicas/2 || !waited) {
+		return nil // wait for the rest, or at least for a majority and the timeout
 	}
 	pref := m.cfg.Preferred[id]
 	sort.Slice(cands, func(i, j int) bool {
@@ -263,13 +269,15 @@ func (m *Membership) Remove(id string) bool {
 	return true
 }
 
-// Ready reports whether the expected shards are known and each has a leader. Before that,
-// routing would send keys to a ring that's about to change.
+// Ready reports whether the expected shards are known and each has a leader that has
+// confirmed its role (reported the set's epoch in a heartbeat): a leader learns it leads
+// from the answer to its heartbeat, and until then it refuses writes. Before that, routing
+// would send keys to a ring that's about to change or to a leader that doesn't know it.
 func (m *Membership) Ready() (bool, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, set := range m.shards {
-		if set.leader == "" {
+		if info := set.replicas[set.leader]; set.leader == "" || info == nil || info.epoch < set.epoch {
 			return false, len(m.shards)
 		}
 	}

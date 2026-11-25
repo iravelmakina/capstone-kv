@@ -93,8 +93,9 @@ func (n *node) stop() {
 	n.srv.Close()
 }
 
-// beat sends one heartbeat for each named replica (all if none) and applies the answer,
-// twice, so that replicas that reported before their set had a leader learn it too.
+// beat sends heartbeats for each named replica (all if none) and applies the answers,
+// three rounds: a set gets its leader once all replicas reported (round 1), every replica
+// learns it from an answer (round 2), and the leader confirms it in a report (round 3).
 func (c *cluster) beat(t *testing.T, ids ...string) {
 	t.Helper()
 	if len(ids) == 0 {
@@ -102,7 +103,7 @@ func (c *cluster) beat(t *testing.T, ids ...string) {
 			ids = append(ids, id)
 		}
 	}
-	for round := 0; round < 2; round++ {
+	for round := 0; round < 3; round++ {
 		for _, id := range ids {
 			n := c.nodes[id]
 			s := n.r.Status()
@@ -278,7 +279,11 @@ func TestNotReadyUntilShardsRegister(t *testing.T) {
 	c.beat(t, "2a")            // one replica isn't a majority: no leader yet
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 503)
-	c.beat(t, "2a", "2b") // 2c stays down
+	c.beat(t, "2a", "2b") // 2c stays down: a majority, but the set waits one timeout for 2c
+	code, body = call(t, "GET", url, "")
+	expect(t, code, body, 503)
+	c.later(20 * time.Second)
+	c.beat(t, "1a", "1b", "1c", "2a", "2b")
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 404) // ready: the item just doesn't exist
 	for i := 0; i < 20; i++ {  // keys of both shards can be written with 2c missing

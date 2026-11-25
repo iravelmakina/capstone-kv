@@ -23,7 +23,7 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down smoke \
+.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down rebuild-replica smoke \
         up-artifacts release up-app down-app app-url smoke-aws bench-aws
 
 help:            ## list targets
@@ -112,16 +112,25 @@ rebuild:         ## timed teardown + rebuild (for docs/m1/recreate-log.md)
 	end=$$(date +%s); \
 	echo "teardown: $$((mid-start))s  rebuild: $$((end-mid))s  total: $$((end-start))s"
 
-# --- M2: the Go app, locally -------------------------------------------------------------
+# --- The Go app, locally (M2, M3) ----------------------------------------------------------
 
 test:            ## go vet + all Go tests (incl. contract test and ring distribution)
 	go vet ./... && go test ./...
 
-local-up:        ## build the image and start coordinator + 2 shards in Docker
+local-up:        ## build the image and start coordinator + 2 shards x 3 replicas in Docker
 	docker compose up --build -d
 
 local-down:      ## stop the local cluster (add -v to docker compose down to wipe data)
 	docker compose down
+
+# A replica whose log is damaged in the middle refuses to start (ADR-0018). Rebuild it:
+# remove its container and volume, start it empty, and it pulls the leader's whole log
+# (ADR-0023 step 6). Never for a shard's only live copy.
+rebuild-replica: ## wipe one local replica and resync it from its leader (R=1b)
+	@test -n "$(R)" || { echo "usage: make rebuild-replica R=<replica, e.g. 1b>"; exit 1; }
+	docker compose rm --stop --force r$(R)
+	docker volume rm kv-r$(R)-data
+	docker compose up -d r$(R)
 
 smoke:           ## the four operations against a running coordinator (BASE=http://...)
 	scripts/smoke.sh $(or $(BASE),http://localhost:8080)

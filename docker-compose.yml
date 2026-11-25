@@ -1,5 +1,19 @@
-# Local cluster: the same image as on EC2, one coordinator and two shards.
-#   docker compose up --build -d      then   scripts/smoke.sh http://localhost:8080
+# Local cluster: the same image as on EC2. One coordinator and 2 shards × 3 replicas
+# (ADR-0020), W = 2, R = 2 (ADR-0021).
+#   make local-up    then   make smoke   and   scripts/failure-tests.sh
+# The coordinator is reachable on localhost:8080 as in AWS. Replica ports are published on
+# 127.0.0.1 only, so the failure tests can read their /health; in AWS they stay private.
+
+x-replica: &replica
+  image: capstone-kv:local
+  depends_on: [coordinator]
+  restart: always
+
+x-replica-env: &replica-env
+  KV_ROLE: shard
+  KV_W: "2"
+  KV_COORDINATOR_URL: http://coordinator:8080
+
 services:
   coordinator:
     build: .
@@ -7,38 +21,53 @@ services:
     environment:
       KV_ROLE: coordinator
       KV_EXPECTED_SHARDS: "2"
+      KV_REPLICAS: "3"
+      KV_W: "2"
+      KV_LEADERS: shard-1=1a,shard-2=2b   # first leaders on different nodes (ADR-0020)
     ports:
-      - "8080:8080"            # the only node reachable from the host, as in AWS
+      - "8080:8080"
     volumes:
       - coordinator-data:/data
     restart: always
 
-  shard-1:
-    image: capstone-kv:local
-    depends_on: [coordinator]
-    environment:
-      KV_ROLE: shard
-      KV_SHARD_ID: shard-1                       # stable ID: decides ring positions
-      KV_COORDINATOR_URL: http://coordinator:8080
-      KV_ADVERTISE_URL: http://shard-1:8080      # how the coordinator reaches this shard
-    volumes:
-      - shard-1-data:/data
-    restart: always
+  r1a:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-1, KV_REPLICA: 1a, KV_ADVERTISE_URL: "http://r1a:8080" }
+    ports: ["127.0.0.1:8111:8080"]
+    volumes: [r1a-data:/data]
+  r1b:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-1, KV_REPLICA: 1b, KV_ADVERTISE_URL: "http://r1b:8080" }
+    ports: ["127.0.0.1:8112:8080"]
+    volumes: [r1b-data:/data]
+  r1c:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-1, KV_REPLICA: 1c, KV_ADVERTISE_URL: "http://r1c:8080" }
+    ports: ["127.0.0.1:8113:8080"]
+    volumes: [r1c-data:/data]
+  r2a:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-2, KV_REPLICA: 2a, KV_ADVERTISE_URL: "http://r2a:8080" }
+    ports: ["127.0.0.1:8121:8080"]
+    volumes: [r2a-data:/data]
+  r2b:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-2, KV_REPLICA: 2b, KV_ADVERTISE_URL: "http://r2b:8080" }
+    ports: ["127.0.0.1:8122:8080"]
+    volumes: [r2b-data:/data]
+  r2c:
+    <<: *replica
+    environment: { <<: *replica-env, KV_SHARD: shard-2, KV_REPLICA: 2c, KV_ADVERTISE_URL: "http://r2c:8080" }
+    ports: ["127.0.0.1:8123:8080"]
+    volumes: [r2c-data:/data]
 
-  shard-2:
-    image: capstone-kv:local
-    depends_on: [coordinator]
-    environment:
-      KV_ROLE: shard
-      KV_SHARD_ID: shard-2
-      KV_COORDINATOR_URL: http://coordinator:8080
-      KV_ADVERTISE_URL: http://shard-2:8080
-    volumes:
-      - shard-2-data:/data
-    restart: always
-
-# Named volumes keep data across `docker compose restart` and container re-creation.
+# Named volumes keep data across restarts and container re-creation. Fixed names, so
+# `make rebuild-replica` can wipe one replica's volume.
 volumes:
-  coordinator-data:
-  shard-1-data:
-  shard-2-data:
+  coordinator-data: { name: kv-coordinator-data }
+  r1a-data: { name: kv-r1a-data }
+  r1b-data: { name: kv-r1b-data }
+  r1c-data: { name: kv-r1c-data }
+  r2a-data: { name: kv-r2a-data }
+  r2b-data: { name: kv-r2b-data }
+  r2c-data: { name: kv-r2c-data }

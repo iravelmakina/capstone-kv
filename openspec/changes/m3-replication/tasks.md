@@ -25,7 +25,7 @@
 - [x] 3.4 Leader: commit wait for one follower (W = 2) or none (W = 1), apply after commit, "not committed" after 2 s
 - [x] 3.5 Reads return the value with its version, or a tombstone with its version
 - [x] 3.6 Health endpoint: role, epoch, last LSN, lag, commit-wait time
-- [ ] 3.7 `make rebuild-replica`: wipe a replica's data and let it resync (built with the compose file, group 5)
+- [x] 3.7 `make rebuild-replica`: wipe a replica's data and let it resync (built with the compose file, group 5)
 - [x] 3.8 `api/internal-openapi.yaml` updated; internal contract test passes
 
 ## 4. Coordinator
@@ -39,8 +39,8 @@
 
 ## 5. Local run
 
-- [ ] 5.1 `docker-compose.yml`: coordinator + 3 nodes × 2 replicas
-- [ ] 5.2 Failure tests on compose, one per scenario of the `replication` and `quorum-reads` specs (follower down, both followers down, leader replaced, only one follower live, former leader returns, follower restart, broken hash link, rebuild, coordinator restart, balanced reads); output in `docs/m3/evidence/local-docker.txt`
+- [x] 5.1 `docker-compose.yml`: coordinator + 3 nodes × 2 replicas
+- [x] 5.2 Failure tests on compose, one per scenario of the `replication` and `quorum-reads` specs (follower down, both followers down, leader replaced, only one follower live, former leader returns, follower restart, broken hash link, rebuild, coordinator restart, balanced reads); output in `docs/m3/evidence/local-docker.txt`
 
 ## 6. Infrastructure
 

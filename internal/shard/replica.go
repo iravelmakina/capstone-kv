@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
@@ -80,6 +81,7 @@ type Replica struct {
 	leaderLast uint64            // follower: the leader's last LSN at the latest pull
 	changed    chan struct{}     // closed and replaced on every change (record, ack, role)
 	waits      latencies         // leader: commit-wait times
+	reads      atomic.Uint64     // reads served (GET and HEAD), to show reads spread out
 
 	onPull func(replica string, lsn uint64) // tests: called on every pull the leader serves; guarded by mu
 }
@@ -215,6 +217,7 @@ func (r *Replica) read(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
+	r.reads.Add(1)
 	e, found := r.st.Lookup(key)
 	if found {
 		w.Header().Set(HeaderEpoch, strconv.FormatUint(e.Version.Epoch, 10))
@@ -479,6 +482,7 @@ type Status struct {
 	Last     store.Version `json:"last"`
 	Lag      uint64        `json:"lag"` // follower: records behind the leader at the last pull
 	Keys     int           `json:"keys"`
+	Reads    uint64        `json:"reads"` // reads served since start
 	CommitMs struct {
 		Last float64 `json:"last"`
 		P99  float64 `json:"p99"`
@@ -491,7 +495,7 @@ func (r *Replica) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := Status{Status: "ok", Version: buildinfo.Version, Shard: r.cfg.Shard, Replica: r.cfg.Replica,
-		Epoch: r.epoch, Leader: r.leaderID, Last: last, Keys: r.st.Len()}
+		Epoch: r.epoch, Leader: r.leaderID, Last: last, Keys: r.st.Len(), Reads: r.reads.Load()}
 	switch {
 	case r.isLeaderLocked():
 		s.Role = "leader"

@@ -22,7 +22,8 @@ paths:
       description: >-
         Every replica calls this at start and then every 5 seconds with its last durable
         record (ADR-0020). An unknown shard joins the ring. A set without a leader gets one
-        once a majority of its replicas has reported: the one with the newest last record.
+        once all its replicas have reported, or a majority has for 15 s: the one with the
+        newest last record (on a tie, the configured first leader).
         The answer is the set's epoch and leader; a replica takes its role from it. A
         replica silent for 15 seconds is unavailable; a silent leader is replaced
         automatically once both followers answer.

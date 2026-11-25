@@ -42,11 +42,17 @@ func fakeShard(t *testing.T, fakes [3]*fakeReplica) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	addrs := make([]string, len(fakes))
 	for i, f := range fakes {
 		srv := httptest.NewServer(f)
 		t.Cleanup(srv.Close)
-		if _, err := members.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: string(rune('a' + i)), Address: srv.URL}); err != nil {
-			t.Fatal(err)
+		addrs[i] = srv.URL
+	}
+	for round := uint64(0); round < 2; round++ { // the second round confirms epoch 1
+		for i, addr := range addrs {
+			if _, err := members.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: string(rune('a' + i)), Address: addr, Epoch: round}); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	tables := openStore(t)
@@ -113,8 +119,12 @@ func TestReadsAreBalanced(t *testing.T) {
 func TestFirstLeaderChoice(t *testing.T) {
 	m, _ := NewMembership(ring.New(8), MembershipConfig{Timeout: time.Minute, ExpectedShards: 1,
 		Replicas: 3, Leaders: openStore(t), Preferred: map[string]string{"shard-1": "1b"}})
-	m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1a", Address: "http://a"})
-	a, _ := m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1b", Address: "http://b"})
+	m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1c", Address: "http://c"})
+	a, _ := m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1a", Address: "http://a"})
+	if a.Leader != "" {
+		t.Fatalf("leader %s chosen before every replica reported or the timeout passed", a.Leader)
+	}
+	a, _ = m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1b", Address: "http://b"})
 	if a.Leader != "1b" || a.Epoch != 1 {
 		t.Fatalf("fresh set: leader %s epoch %d, want the preferred 1b in epoch 1", a.Leader, a.Epoch)
 	}
@@ -122,6 +132,7 @@ func TestFirstLeaderChoice(t *testing.T) {
 	m, _ = NewMembership(ring.New(8), MembershipConfig{Timeout: time.Minute, ExpectedShards: 1,
 		Replicas: 3, Leaders: openStore(t), Preferred: map[string]string{"shard-1": "1b"}})
 	m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1a", Address: "http://a", Epoch: 4, Last: store.Version{Epoch: 4, LSN: 9}})
+	m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1c", Address: "http://c", Epoch: 4, Last: store.Version{Epoch: 4, LSN: 9}})
 	a, _ = m.Heartbeat(shard.Heartbeat{Shard: "shard-1", Replica: "1b", Address: "http://b", Epoch: 4, Last: store.Version{Epoch: 4, LSN: 7}})
 	if a.Leader != "1a" || a.Epoch != 5 {
 		t.Fatalf("set with data: leader %s epoch %d, want the newer 1a in epoch 5", a.Leader, a.Epoch)
