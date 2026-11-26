@@ -117,3 +117,84 @@ coordinator min balance per 5 min: 11.118309733333334 12.63769515 11.13578736666
 node-a min balance per 5 min: 0.9996114833333334 2.6366664 3.0190713166666665 3.3416038666666665 3.674317266666667 3.9875488666666667 4.3142377666666665
 node-b min balance per 5 min: 0.9320893 2.6159241166666667 3.09345575 3.521097533333333 3.9450951666666665 4.340108666666667 4.761685533333333 5.384235716666667
 node-c min balance per 5 min: 0.967055 2.9285292833333334 3.95666765 4.93390535 5.8558444 6.849213383333334 7.79309585 8.9030121
+
+######## Second M3 AWS session, 2026-11-26 21:17-22:35 UTC, release 891923e65ef2 ########
+Template from commit 1fa44c9 (task 6.4 fix); app code unchanged since 891923e, so the same
+release as the first session. Nothing merged into main during the session.
+
+===== [A13] deploy: the coordinator's two rules are now separate resources (task 6.4) =====
+$ CONFIRM=yes make up-app VERSION=891923e65ef2 BENCH=true W=2
+|  Add|  BenchmarkClientInstance   |  AWS::EC2::Instance              |  None |
+|  Add|  ClientSecurityGroup       |  AWS::EC2::SecurityGroup         |  None |
+|  Add|  CoordinatorFromClient     |  AWS::EC2::SecurityGroupIngress  |  None |
+|  Add|  CoordinatorFromVpc        |  AWS::EC2::SecurityGroupIngress  |  None |
+|  Add|  CoordinatorSecurityGroup  |  AWS::EC2::SecurityGroup         |  None |
+|  Add|  Coordinator               |  AWS::EC2::Instance              |  None |
+|  Add|  NodeA / NodeB / NodeC     |  AWS::EC2::Instance              |  None |
+|  Add|  ShardFromShard            |  AWS::EC2::SecurityGroupIngress  |  None |
+|  Add|  ShardSecurityGroup        |  AWS::EC2::SecurityGroup         |  None |
+CREATE_COMPLETE      (21:17:58-21:19:36, 1 min 38 s)
+$ aws ec2 describe-security-group-rules (coordinator group, inbound)
+8080	8080	10.20.0.0/16	API from inside the VPC (replicas, benchmark client)
+8080	8080	<my IP>/32	API from the allowed client range (my laptop)
+Placement as in A2: coordinator and node-a in use1-az1, node-b use1-az2, node-c use1-az4.
+
+===== [A14] smoke test =====
+$ make smoke-aws VERSION=891923e65ef2
+all 7 containers run 891923e65ef2; create table, CREATE, READ, EXISTS, DELETE, READ and
+EXISTS after delete all ok; SSM status: Success
+
+===== [A15] benchmark W = 2, workload A, control run on fresh instances, 21:20-21:55 UTC =====
+$ make bench-aws VERSION=891923e65ef2 WORKLOADS=a LABEL=w2-control
+3 runs, SSM status Success, 0 failed requests; 1,542 / 1,550 / 1,545 ops/s
+saved to bench-results/891923e65ef2/20261126T215529Z-w2-control.txt (and in the artifacts bucket)
+
+===== [A16] one follower of each shard stopped: writes and reads keep working (task 7.1, by hand) =====
+$ aws ec2 stop-instances (node-c)          stopping 21:55:39, stopped 21:56:11
+$ curl <coordinator>/internal/v1/shards    (from the laptop, 21:56:16)
+shard-1 epoch 1 leader 1a: 1a up, 1b up, 1c available:false (silent 39 s)
+shard-2 epoch 1 leader 2b: 2a up, 2b up, 2c available:false (silent 39 s)
+# node-c holds only followers (1c, 2c), so no leader change: epoch stays 1.
+$ create table "followerdown", then PUT and GET six keys k1..k6 through the coordinator
+201
+k1 PUT 200 GET {"v":"k1"} 200
+k2 PUT 200 GET {"v":"k2"} 200
+k3 PUT 200 GET {"v":"k3"} 200
+k4 PUT 200 GET {"v":"k4"} 200
+k5 PUT 200 GET {"v":"k5"} 200
+k6 PUT 200 GET {"v":"k6"} 200
+$ curl <coordinator>/health
+{"failures":{"shard-1":{"notCommitted504":0,"unavailable503":0},"shard-2":{"notCommitted504":0,"unavailable503":0}},"ready":true,...}
+
+===== [A17] benchmark W = 2, workload A, node-c stopped, 21:56-22:31 UTC =====
+$ make bench-aws VERSION=891923e65ef2 WORKLOADS=a LABEL=follower-down
+3 runs, SSM status Success, 0 failed requests; 1,523 / 1,533 / 1,535 ops/s
+saved to bench-results/891923e65ef2/20261126T223149Z-follower-down.txt (and in the artifacts bucket)
+503/504 counters on the coordinator stayed 0 throughout (checked 22:08, 22:14, 22:22).
+
+===== [A18] node-c started again: its replicas catch up from their last record =====
+$ aws ec2 start-instances (node-c)          22:32:00, running 22:32:17
+LSNs as the coordinator reports them (heartbeat every 5 s):
+22:32:00  shard-1 1a=1548904 1b=1548904 1c=775291 (down)   shard-2 2b=1648826 2a=1648826 2c=823234 (down)
+22:32:33  1c up, lsn 775291                                 2c up, lsn 823234
+22:32:39  1c=1300291                                        2c=1060234
+22:32:43  1c=1300291                                        2c=1343234
+22:32:48  1c=1548904 (= leader)                             2c=1648826 (= leader)
+# 773,613 and 825,592 missing records pulled in about 15 s after the first heartbeat,
+# about 31 s after the instance was running; no 503/504 during the catch-up.
+
+===== [A19] CPU credits during the session (CloudWatch, maximum per 10 min, 21:15-22:35 UTC) =====
+coordinator CPUCreditBalance 0 throughout; CPUSurplusCreditBalance 0.8 2.6 5.3 7.9 9.0 11.3 13.7 16.1
+node-a      CPUCreditBalance 0 throughout; CPUSurplusCreditBalance 0.8 1.0 1.5 2.0 2.1 2.4 3.1 3.7
+node-b      CPUCreditBalance 0 throughout; CPUSurplusCreditBalance 0.8 0.8 1.0 1.2 1.1 1.0 1.3 1.5
+node-c      CPUCreditBalance 0 0 0.1 0.6 0.9 (then stopped); CPUSurplusCreditBalance 0.9 0.5 0.1 0 0
+client      CPUCreditBalance 0 1.2 1.8 2.5 3.9 4.7 5.5 6.3; surplus 0.1 then 0
+# About 22 surplus credits in all (1 credit = 1 vCPU-minute, $0.05 per vCPU-hour): ~$0.02.
+
+===== [A20] spend and teardown =====
+$ aws ce get-cost-and-usage (account, 2026-11-01..2026-11-27, unblended)   26.65 USD
+# Whole lab account, so it includes the lab's own resources; Cost Explorer lags up to a day.
+$ make down-app                              22:33:25-22:34:58
+velmakina-kv-app deleted
+$ aws ec2 describe-instances (Name=velmakina*, not terminated)       -> none
+$ aws cloudformation list-stacks (velmakina*)                         -> network, artifacts only
