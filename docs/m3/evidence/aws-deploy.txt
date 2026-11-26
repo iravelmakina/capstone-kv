@@ -198,3 +198,39 @@ $ make down-app                              22:33:25-22:34:58
 velmakina-kv-app deleted
 $ aws ec2 describe-instances (Name=velmakina*, not terminated)       -> none
 $ aws cloudformation list-stacks (velmakina*)                         -> network, artifacts only
+
+######## M3 merged into main: the pipeline deploys M3 (tasks 7.1, 7.2), 2026-11-26 23:12-23:21 UTC ########
+
+===== [A21] ci-cd run 45909517561 on main, merge commit d289ab857dcb (PR #2) =====
+https://github.com/iravelmakina/capstone-kv/actions/runs/45909517561
+test (vet, gofmt, go test -race, cfn-lint)     success  23:12:19-23:12:59
+deploy infrastructure (network, artifacts)     success  23:13:01-23:13:16
+build release                                  success  23:13:01-23:13:55
+deploy app                                     success  23:13:57-23:15:46
+smoke test (on the coordinator, via SSM)       success  23:15:48-23:17:50
+The new release d289ab857dcb is the first built by the pipeline from M3 code; the stack was
+created from nothing (no app stack before the run).
+
+Step "every node runs the release; create table, put, read, exists, delete" (make smoke-aws):
+ok   coordinator version (d289ab857dcb)
+ok   shard http://10.20.75.179:8081 / 10.20.80.226:8081 / 10.20.105.131:8081 version (d289ab857dcb)
+ok   shard http://10.20.75.179:8082 / 10.20.80.226:8082 / 10.20.105.131:8082 version (d289ab857dcb)
+ok   create table (201), CREATE (200), READ (200), READ returns value, EXISTS (200),
+     DELETE (204), READ after delete (404), EXISTS after delete (404)
+SSM status: Success
+
+Step "one follower per shard down; puts still commit and read back" (make smoke-replica, task 7.1):
+23:16:56  stopping node i-02afceb3652307a7e (10.20.105.131): one follower of each shard
+23:17:20  ok   every replica on 10.20.105.131 reported down
+23:17:20  ok   10 puts committed and read back, then deleted, with 10.20.105.131 down
+23:17:20  starting i-02afceb3652307a7e
+23:17:47  ok   every replica on 10.20.105.131 back and at its leader's last record
+          smoke-replica passed
+
+===== [A22] teardown after the pipeline =====
+$ aws cloudformation describe-stacks velmakina-kv-app    CREATE_COMPLETE, AppVersion d289ab857dcb
+  4 instances running (coordinator, node-a, node-b, node-c; node-c running again)
+$ make down-app                                          23:18:29-23:21:02
+velmakina-kv-app deleted
+$ aws ec2 describe-instances (Name=velmakina*, not terminated)       -> none
+$ aws cloudformation list-stacks (velmakina*)                         -> network, artifacts only
