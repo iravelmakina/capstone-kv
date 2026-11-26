@@ -62,6 +62,6 @@
 ## 9. Review and docs
 
 - [ ] 9.1 `docs/m3/control-questions.md` (author's notes), using the design's failure-mode table for the CP/AP and staleness questions
-- [ ] 9.2 README: how to run with replicas; what changed since M2
+- [x] 9.2 README: how to run with replicas; what changed since M2
 - [ ] 9.3 `docs/m3/cost.md`: spend of the M3 sessions, including any CPU-credit surplus, against the remaining credit
-- [ ] 9.4 `AGENT_WORKLOG.md` has a row for every agent-made file
+- [x] 9.4 `AGENT_WORKLOG.md` has a row for every agent-made file
