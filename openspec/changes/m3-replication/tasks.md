@@ -51,8 +51,8 @@
 
 ## 7. CI/CD
 
-- [ ] 7.1 Smoke test also checks that a put is readable with one follower stopped
-- [ ] 7.2 A deploy from `main` goes green with the M3 stack
+- [x] 7.1 Smoke test also checks that a put is readable with one follower stopped
+- [x] 7.2 A deploy from `main` goes green with the M3 stack
 
 ## 8. Benchmark
 
