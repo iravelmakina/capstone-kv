@@ -1,0 +1,119 @@
+First M3 deploy to AWS Academy (us-east-1), release 891923e65ef2 (commit 891923e).
+2026-11-25/26 (UTC). Account IDs replaced with <ACCOUNT_ID>. Commands run from the laptop
+with profile academy; checks on the instances through SSM (no inbound ports opened).
+
+===== [A1] change set of the new app stack, before executing =====
+$ make up-app        (answered "no" at the prompt: change set printed, nothing executed)
+|  Add|  CoordinatorSecurityGroup  |  AWS::EC2::SecurityGroup         |  None |
+|  Add|  Coordinator               |  AWS::EC2::Instance              |  None |
+|  Add|  NodeA                     |  AWS::EC2::Instance              |  None |
+|  Add|  NodeB                     |  AWS::EC2::Instance              |  None |
+|  Add|  NodeC                     |  AWS::EC2::Instance              |  None |
+|  Add|  ShardFromShard            |  AWS::EC2::SecurityGroupIngress  |  None |
+|  Add|  ShardSecurityGroup        |  AWS::EC2::SecurityGroup         |  None |
+$ CONFIRM=yes make up-app
+CREATE_COMPLETE      (1 min 38 s)
+
+===== [A2] instances: one shard node per AZ, no public IP on the nodes (spec: Placement) =====
+$ aws ec2 describe-instances (stack velmakina-kv-app): name, AZ ID, subnet, private IP, public IP, type, state
+velmakina-kv-coordinator	use1-az1	subnet-08a4b8847bd1e472b	10.20.3.184	<public IP>	t3.small	running
+velmakina-kv-node-a	use1-az1	subnet-02d198abc7fcfd1d8	10.20.69.103	-	t3.small	running
+velmakina-kv-node-b	use1-az2	subnet-00bc8b5fad5c4c37e	10.20.89.149	-	t3.small	running
+velmakina-kv-node-c	use1-az4	subnet-096996f713706684a	10.20.103.243	-	t3.small	running
+
+
+===== [A3] shard security group: 8081-8082 only from the coordinator and from itself =====
+$ aws ec2 describe-security-groups: inbound rules of the shard group
+tcp	8081	8082	<coordinator-sg>	<shard-sg itself>	None
+
+===== [A4] replica sets as the coordinator sees them (spec: Replica sets registered) =====
+$ (on the coordinator via SSM) curl -s localhost:8080/internal/v1/shards | jq '{id, epoch, leader, replicas}'
+{"id":"shard-1","epoch":1,"leader":"1a","replicas":[{"id":"1a","address":"http://10.20.69.103:8081","available":true,"lsn":0},{"id":"1b","address":"http://10.20.89.149:8081","available":true,"lsn":0},{"id":"1c","address":"http://10.20.103.243:8081","available":true,"lsn":0}]}
+{"id":"shard-2","epoch":1,"leader":"2b","replicas":[{"id":"2a","address":"http://10.20.69.103:8082","available":true,"lsn":0},{"id":"2b","address":"http://10.20.89.149:8082","available":true,"lsn":0},{"id":"2c","address":"http://10.20.103.243:8082","available":true,"lsn":0}]}
+# Shard 1 led by 1a on node a, shard 2 by 2b on node b (ADR-0020); every shard has one
+# replica on each node: 8081 = shard 1, 8082 = shard 2.
+
+===== [A5] smoke test on the coordinator: all 7 containers run the release =====
+$ make smoke-aws
+ok   coordinator version (891923e65ef2)
+ok   shard http://10.20.69.103:8081 version (891923e65ef2)
+ok   shard http://10.20.89.149:8081 version (891923e65ef2)
+ok   shard http://10.20.103.243:8081 version (891923e65ef2)
+ok   shard http://10.20.69.103:8082 version (891923e65ef2)
+ok   shard http://10.20.89.149:8082 version (891923e65ef2)
+ok   shard http://10.20.103.243:8082 version (891923e65ef2)
+ok   create table (201)
+ok   CREATE (200)
+ok   READ (200)
+ok   READ returns value ({"hello":"world"})
+ok   EXISTS (200)
+ok   DELETE (204)
+ok   READ after delete (404)
+ok   EXISTS after delete (404)
+smoke test passed against http://localhost:8080
+SSM status: Success
+
+===== [A6] benchmark client added, nothing else touched =====
+$ make up-app BENCH=true      (change set first)
+|  Add|  BenchmarkClientInstance  |  AWS::EC2::Instance       |  None |
+|  Add|  ClientSecurityGroup      |  AWS::EC2::SecurityGroup  |  None |
+UPDATE_COMPLETE
+
+===== [A7] benchmark W = 2 (workloads A and B), 23:12-23:58 UTC =====
+$ make bench-aws
+release 891923e65ef2, 6 runs, SSM status Success, 0 failed requests
+saved to bench-results/891923e65ef2/20261125T235803Z.txt (and the same path in the artifacts bucket)
+
+===== [A8] incident: the pipeline on main replaced the M3 stack with M2, 00:30-00:35 UTC =====
+For the "follower down" variant, node-c was stopped (ec2 stop-instances, 00:02 UTC; SSM can't
+reach the shard nodes, which have no route to it) and workload A started at 00:04.
+At 00:30 PR #1 (ci-docs-check) was merged into main. The ci-cd pipeline deployed main, still
+the M2 code, onto the same stack velmakina-kv-app: CloudFormation removed NodeA/B/C and the
+benchmark client and created M2's Shard1/Shard2 (stack events 00:33-00:35). The client ran
+the three runs but was terminated before SSM could return them: the follower-down results
+are lost (the SSM command shows "Undeliverable"). To be run again in the next lab session.
+Lesson: while M3 is deployed by hand, nothing is merged into main (the pipeline and the
+manual deploys share one stack).
+
+===== [A9] redeploy M3 with W = 1 and the client; coordinator security group fixed by hand =====
+$ make up-app VERSION=891923e65ef2 W=1 BENCH=true   (change set first)
+|  Add   |  BenchmarkClientInstance   |  AWS::EC2::Instance              |  None        |
+|  Add   |  ClientSecurityGroup       |  AWS::EC2::SecurityGroup         |  None        |
+|  Modify|  CoordinatorSecurityGroup  |  AWS::EC2::SecurityGroup         |  False       |
+|  Modify|  Coordinator               |  AWS::EC2::Instance              |  Conditional |
+|  Add   |  NodeA / NodeB / NodeC     |  AWS::EC2::Instance              |  None        |
+|  Remove|  Shard1 / Shard2           |  AWS::EC2::Instance              |  None        |
+|  Add   |  ShardFromShard            |  AWS::EC2::SecurityGroupIngress  |  None        |
+|  Modify|  ShardSecurityGroup        |  AWS::EC2::SecurityGroup         |  True        |
+UPDATE_COMPLETE (00:57-01:00 UTC)
+No replica reached the coordinator for 7 minutes: the coordinator's group allowed 8080 only
+from my laptop's /32. Cause, a template bug: the pipeline deploys with
+CLIENT_CIDR=10.20.0.0/16 (no ALLOWED_CLIENT_CIDR variable set), so the group's two rules
+("from the VPC" and "from the client") were the same rule, which EC2 keeps once. My deploy
+changed the client CIDR to my /32: CloudFormation revoked the old client rule 10.20.0.0/16,
+which was also the VPC rule. Fixed by hand for this run (01:08), then gone with the stack:
+$ aws ec2 authorize-security-group-ingress --group-id <coordinator-sg> --ip-permissions tcp 8080 10.20.0.0/16
+ready within 10 s. A template fix is still to do.
+
+===== [A10] benchmark W = 1 (workload A only), 01:09-01:40 UTC =====
+$ make bench-aws VERSION=891923e65ef2 WORKLOADS=a LABEL=w1
+3 runs, SSM status Success, 0 failed requests
+saved to bench-results/891923e65ef2/20261126T014009Z-w1.txt (and in the artifacts bucket)
+
+===== [A11] teardown, 01:40-01:41 UTC =====
+$ make down-app
+velmakina-kv-app deleted
+$ aws ec2 describe-instances (Name=velmakina*, not terminated)       -> none
+$ aws cloudformation describe-stacks (velmakina*)                     -> network, artifacts only
+
+===== [A12] CPU credit balance during the benchmarks (CloudWatch, minimum per 5 min) =====
+W=2 run (2026-11-25 23:12-23:58 UTC):
+coordinator min balance per 5 min: 0.0 0.7574074 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+node-a min balance per 5 min: 0.0 0.4769411666666667 0.4040975666666667 0.45216033333333333 0.63966005 0.8555840333333333 1.0730411833333333 1.3174768666666667 0.8907150166666666 0.0
+node-b min balance per 5 min: 0.0 0.6223845 0.4592022333333333 0.12715063333333335 0.0 0.0 0.0 0.0 0.0 0.0
+node-c min balance per 5 min: 0.0 0.6769803166666667 0.6855036 0.5191338166666667 0.35603018333333336 0.14874275 0.0 0.0 0.0 0.0
+W=1 run (2026-11-26 01:09-01:40 UTC):
+coordinator min balance per 5 min: 11.118309733333334 12.63769515 11.135787366666667 9.41375405 7.6591651 5.9041382166666665 4.1375586166666665 2.7058646333333334
+node-a min balance per 5 min: 0.9996114833333334 2.6366664 3.0190713166666665 3.3416038666666665 3.674317266666667 3.9875488666666667 4.3142377666666665
+node-b min balance per 5 min: 0.9320893 2.6159241166666667 3.09345575 3.521097533333333 3.9450951666666665 4.340108666666667 4.761685533333333 5.384235716666667
+node-c min balance per 5 min: 0.967055 2.9285292833333334 3.95666765 4.93390535 5.8558444 6.849213383333334 7.79309585 8.9030121
