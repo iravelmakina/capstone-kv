@@ -1,24 +1,25 @@
-// Package store keeps a shard's keys in memory and makes every change durable in an
-// append-only log on disk, replayed at start (ADR-0013).
+// Package store keeps a replica's keys in memory and makes every change durable in an
+// append-only log on disk, replayed at start (ADR-0013). From M3 the same log is the
+// replication log (ADR-0022): followers receive the leader's records byte for byte.
 //
-// Log format: a sequence of records, each
+// Record format (integers big-endian):
 //
-//	[4 bytes length][4 bytes CRC-32C of payload][payload]
+//	[1 B format version = 1][4 B body length n]
+//	body: [8 B epoch][8 B LSN][8 B prev hash][1 B op: 1=put, 2=delete][2 B key length][key][value]
+//	[4 B CRC-32C over everything before it]
 //
-// where payload is
+// LSNs start at 1 and grow by 1. "prev hash" is xxhash64 of the previous record's bytes
+// (0 for the first), so two logs that differ anywhere differ in every later link. A key's
+// version is (epoch, LSN) of its last write; a delete leaves a tombstone with its version.
 //
-//	[1 byte op: 1=put, 2=delete][4 bytes key length][key][value]
+// A damaged record is handled by where it is (ADR-0018):
 //
-// Integers are big-endian. Length and checksum let replay find a damaged record. What
-// happens then depends on where it is (ADR-0018):
-//
-//   - at the end of the file (its header is cut short, or its declared end reaches the
-//     end of the file): a crash during an append. Replay keeps everything before it and
-//     cuts it off, so new appends never land after garbage;
+//   - at the end of the file (cut short, or its declared end reaches the end of the
+//     file): a crash during an append. Replay keeps everything before it and cuts it off;
 //   - followed by more bytes: damage in the middle, which a crash can't cause. Open fails
-//     and names the offset; a person decides. Acknowledged writes are never cut silently.
+//     and names the offset; a person decides (or rebuilds the replica from the leader).
 //
-// A failed write is cut back the same way before Put/Delete return the error.
+// A failed write is cut back the same way before the error is returned.
 package store
 
 import (
@@ -30,26 +31,82 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 const (
-	opPut    byte = 1
-	opDelete byte = 2
+	OpPut    byte = 1
+	OpDelete byte = 2
 
-	headerSize = 8       // length + checksum
-	maxRecord  = 8 << 20 // 8 MiB: anything longer is treated as a damaged length field
+	formatVersion byte = 1
+	prefixSize         = 1 + 4             // format version + body length
+	bodyFixed          = 8 + 8 + 8 + 1 + 2 // epoch, LSN, prev hash, op, key length
+	sumSize            = 4                 // CRC-32C
+	Overhead           = prefixSize + bodyFixed + sumSize
+	maxRecord          = 8 << 20 // 8 MiB: anything longer is treated as a damaged length field
+	maxKey             = 1<<16 - 1
 )
 
 // castagnoli is CRC-32C, the checksum variant with hardware support on x86 and ARM.
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
-// ErrDamaged is returned by Open when the log is damaged somewhere other than its last
-// record (ADR-0018).
-var ErrDamaged = errors.New("log damaged in the middle")
+var (
+	// ErrDamaged: the log is damaged somewhere other than its last record (ADR-0018).
+	ErrDamaged = errors.New("log damaged in the middle")
+	// ErrGap: a replicated record doesn't follow the last one (a missing LSN).
+	ErrGap = errors.New("record doesn't follow the last one")
+	// ErrBrokenChain: a record's prev hash doesn't match this log's last record, so this
+	// log and the sender's disagree about an earlier record (ADR-0022).
+	ErrBrokenChain = errors.New("hash chain broken")
+	// ErrStaleEpoch: a write carries an epoch older than the log's last record.
+	ErrStaleEpoch = errors.New("epoch older than the log's")
+)
 
-// logFile is what the store needs from the log file; *os.File has it. Tests swap in a
-// file that fails on purpose.
+// Version orders writes: epoch first, then LSN.
+type Version struct {
+	Epoch uint64 `json:"epoch"`
+	LSN   uint64 `json:"lsn"`
+}
+
+// Less reports whether v is older than o.
+func (v Version) Less(o Version) bool {
+	if v.Epoch != o.Epoch {
+		return v.Epoch < o.Epoch
+	}
+	return v.LSN < o.LSN
+}
+
+// Record is one decoded log record.
+type Record struct {
+	Epoch, LSN, Prev uint64
+	Op               byte
+	Key              string
+	Value            []byte
+}
+
+// Version returns the record's version.
+func (r Record) Version() Version { return Version{r.Epoch, r.LSN} }
+
+// Entry is what the store holds for a key: its last value or a tombstone, and its version.
+type Entry struct {
+	Value   []byte
+	Version Version
+	Deleted bool
+}
+
+// meta is what the store remembers about each record without reading the file; the
+// record with LSN n is meta[n-1].
+type meta struct {
+	offset int64
+	epoch  uint64
+	hash   uint64
+}
+
+// logFile is what the store needs from the log file for writing; *os.File has it. Tests
+// swap in a file that fails on purpose.
 type logFile interface {
 	io.Writer
 	io.Seeker
@@ -58,12 +115,15 @@ type logFile interface {
 	Truncate(size int64) error
 }
 
-// Store is a durable key-value map. Safe for concurrent use.
+// Store is a durable key-value map over a log. Safe for concurrent use.
 type Store struct {
 	mu   sync.RWMutex
-	data map[string][]byte
-	f    logFile
-	end  int64 // offset just after the last good record: where the next append goes
+	data map[string]Entry
+	recs []meta
+	path string
+	f    logFile  // appends
+	rf   *os.File // reads (ReadAfter, rebuild after truncation); ReadAt is safe concurrently
+	end  int64    // offset just after the last good record: where the next append goes
 	// broken is set when a failed write couldn't be cut back: from then on every write
 	// fails, so nothing is ever appended after garbage. Cleared only by a restart.
 	broken error
@@ -74,69 +134,186 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "data.log"), os.O_RDWR|os.O_CREATE, 0o644)
+	path := filepath.Join(dir, "data.log")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{data: map[string][]byte{}, f: f}
-	good, err := s.replay(f)
+	rf, err := os.Open(path)
 	if err != nil {
-		f.Close() // nothing is cut: the file stays as it was for a person to look at
+		f.Close()
+		return nil, err
+	}
+	s := &Store{path: path, f: f, rf: rf}
+	info, err := f.Stat()
+	if err != nil {
+		s.closeFiles()
+		return nil, err
+	}
+	good, err := s.replay(io.NewSectionReader(rf, 0, info.Size()), info.Size())
+	if err != nil {
+		s.closeFiles() // nothing is cut: the file stays as it was for a person to look at
 		return nil, err
 	}
 	s.end = good
 	// Drop a torn tail (if any) and position the file for appends.
 	if err := s.cutBack(); err != nil {
-		f.Close()
+		s.closeFiles()
 		return nil, err
 	}
 	return s, nil
 }
 
-// replay applies every intact record and returns the offset just after the last one. A
-// damaged record that isn't the last thing in the file is an error (ErrDamaged).
-func (s *Store) replay(f *os.File) (int64, error) {
-	info, err := f.Stat()
-	if err != nil {
-		return 0, err
-	}
-	size := info.Size()
-	r := bufio.NewReader(f)
+func (s *Store) closeFiles() {
+	s.f.Close()
+	s.rf.Close()
+}
+
+// replay rebuilds the map and the record index from the first size bytes of r and returns
+// the offset just after the last good record. A damaged record that isn't the last thing
+// in the file is an error (ErrDamaged).
+func (s *Store) replay(r io.Reader, size int64) (int64, error) {
+	s.data = map[string]Entry{}
+	s.recs = s.recs[:0]
+	br := bufio.NewReader(r)
 	var offset int64
-	header := make([]byte, headerSize)
+	prefix := make([]byte, prefixSize)
 
 	// damaged decides what a bad record at offset means, from where it says it ends.
-	damaged := func(n uint32, what string) (int64, error) {
-		end := offset + int64(headerSize) + int64(n)
+	damaged := func(end int64, what string) (int64, error) {
 		if end >= size {
 			return offset, nil // the last record: torn by a crash, cut off by Open
 		}
 		return offset, fmt.Errorf("%w: %s: %s at offset %d, %d more bytes follow; "+
-			"restore the file, or truncate it at that offset by hand and accept the loss",
-			ErrDamaged, f.Name(), what, offset, size-end)
+			"restore the file, or rebuild the replica from the leader",
+			ErrDamaged, s.path, what, offset, size-end)
 	}
 
 	for {
-		if _, err := io.ReadFull(r, header); err != nil {
-			return offset, nil // clean end of file, or a header cut short: a torn tail
+		if _, err := io.ReadFull(br, prefix); err != nil {
+			return offset, nil // clean end of file, or a prefix cut short: a torn tail
 		}
-		n := binary.BigEndian.Uint32(header[0:4])
-		sum := binary.BigEndian.Uint32(header[4:8])
-		if n < 5 || n > maxRecord {
-			return damaged(n, "impossible record length")
+		n := int64(binary.BigEndian.Uint32(prefix[1:5]))
+		end := offset + prefixSize + n + sumSize
+		if prefix[0] != formatVersion {
+			return damaged(end, fmt.Sprintf("unknown format version %d", prefix[0]))
 		}
-		payload := make([]byte, n)
-		if _, err := io.ReadFull(r, payload); err != nil {
-			return offset, nil // payload cut short: runs past the end, a torn tail
+		if n < bodyFixed || n > maxRecord {
+			return damaged(end, "impossible record length")
 		}
-		if crc32.Checksum(payload, castagnoli) != sum {
-			return damaged(n, "checksum mismatch")
+		b := make([]byte, prefixSize+n+sumSize)
+		copy(b, prefix)
+		if _, err := io.ReadFull(br, b[prefixSize:]); err != nil {
+			return offset, nil // runs past the end of the file: a torn tail
 		}
-		if err := s.apply(payload); err != nil {
-			return damaged(n, err.Error())
+		rec, err := decode(b)
+		if err != nil {
+			return damaged(end, err.Error())
 		}
-		offset += int64(headerSize) + int64(n)
+		if err := s.follows(rec); err != nil {
+			return damaged(end, err.Error())
+		}
+		s.recs = append(s.recs, meta{offset: offset, epoch: rec.Epoch, hash: xxhash.Sum64(b)})
+		s.apply(rec)
+		offset = end
 	}
+}
+
+// follows checks that rec can come right after the log's last record. Callers hold the lock.
+func (s *Store) follows(rec Record) error {
+	last, hash := s.lastLocked()
+	switch {
+	case rec.LSN != last.LSN+1:
+		return fmt.Errorf("%w: LSN %d after %d", ErrGap, rec.LSN, last.LSN)
+	case rec.Prev != hash:
+		return fmt.Errorf("%w at LSN %d", ErrBrokenChain, rec.LSN)
+	case rec.Epoch < last.Epoch:
+		return fmt.Errorf("%w: epoch %d after %d", ErrBrokenChain, rec.Epoch, last.Epoch)
+	}
+	return nil
+}
+
+// encode builds the bytes of one complete record.
+func (r Record) encode() []byte {
+	n := bodyFixed + len(r.Key) + len(r.Value)
+	b := make([]byte, prefixSize+n+sumSize)
+	b[0] = formatVersion
+	binary.BigEndian.PutUint32(b[1:5], uint32(n))
+	p := b[prefixSize:]
+	binary.BigEndian.PutUint64(p[0:8], r.Epoch)
+	binary.BigEndian.PutUint64(p[8:16], r.LSN)
+	binary.BigEndian.PutUint64(p[16:24], r.Prev)
+	p[24] = r.Op
+	binary.BigEndian.PutUint16(p[25:27], uint16(len(r.Key)))
+	copy(p[27:], r.Key)
+	copy(p[27+len(r.Key):], r.Value)
+	binary.BigEndian.PutUint32(b[prefixSize+n:], crc32.Checksum(b[:prefixSize+n], castagnoli))
+	return b
+}
+
+// decode parses the bytes of one complete record and checks its checksum.
+func decode(b []byte) (Record, error) {
+	if len(b) < Overhead || b[0] != formatVersion {
+		return Record{}, errors.New("not a record")
+	}
+	n := int(binary.BigEndian.Uint32(b[1:5]))
+	if prefixSize+n+sumSize != len(b) {
+		return Record{}, errors.New("length field doesn't match the record")
+	}
+	if crc32.Checksum(b[:prefixSize+n], castagnoli) != binary.BigEndian.Uint32(b[prefixSize+n:]) {
+		return Record{}, errors.New("checksum mismatch")
+	}
+	p := b[prefixSize : prefixSize+n]
+	rec := Record{
+		Epoch: binary.BigEndian.Uint64(p[0:8]),
+		LSN:   binary.BigEndian.Uint64(p[8:16]),
+		Prev:  binary.BigEndian.Uint64(p[16:24]),
+		Op:    p[24],
+	}
+	klen := int(binary.BigEndian.Uint16(p[25:27]))
+	if 27+klen > len(p) {
+		return Record{}, errors.New("key length past end of record")
+	}
+	if rec.Op != OpPut && rec.Op != OpDelete {
+		return Record{}, fmt.Errorf("unknown op %d", rec.Op)
+	}
+	rec.Key = string(p[27 : 27+klen])
+	rec.Value = append([]byte(nil), p[27+klen:]...)
+	return rec, nil
+}
+
+// DecodeRecords splits bytes from ReadAfter into records, checking each checksum.
+func DecodeRecords(raw []byte) ([]Record, error) {
+	var recs []Record
+	for len(raw) > 0 {
+		if len(raw) < prefixSize {
+			return nil, errors.New("records cut short")
+		}
+		size := prefixSize + int(binary.BigEndian.Uint32(raw[1:5])) + sumSize
+		if size > len(raw) {
+			return nil, errors.New("records cut short")
+		}
+		rec, err := decode(raw[:size])
+		if err != nil {
+			return nil, fmt.Errorf("record %d: %w", len(recs)+1, err)
+		}
+		recs = append(recs, rec)
+		raw = raw[size:]
+	}
+	return recs, nil
+}
+
+// apply puts a record into the map, unless the map already holds a newer version of the
+// key: on a leader, commits can finish in any order (ADR-0023). Callers hold the lock.
+func (s *Store) apply(rec Record) {
+	if cur, ok := s.data[rec.Key]; ok && !cur.Version.Less(rec.Version()) {
+		return
+	}
+	e := Entry{Version: rec.Version(), Deleted: rec.Op == OpDelete}
+	if !e.Deleted {
+		e.Value = rec.Value
+	}
+	s.data[rec.Key] = e
 }
 
 // cutBack makes the file end at the last good record and positions it for the next append.
@@ -150,55 +327,19 @@ func (s *Store) cutBack() error {
 	return s.f.Sync()
 }
 
-// apply decodes one payload and changes the in-memory map.
-func (s *Store) apply(p []byte) error {
-	op := p[0]
-	klen := binary.BigEndian.Uint32(p[1:5])
-	if int(klen) > len(p)-5 {
-		return errors.New("key length past end of record")
-	}
-	key := string(p[5 : 5+klen])
-	switch op {
-	case opPut:
-		s.data[key] = p[5+klen:]
-	case opDelete:
-		delete(s.data, key)
-	default:
-		return fmt.Errorf("unknown op %d", op)
-	}
-	return nil
-}
-
-// encode builds one complete record (header + payload).
-func encode(op byte, key string, value []byte) []byte {
-	n := 1 + 4 + len(key) + len(value)
-	rec := make([]byte, headerSize+n)
-	p := rec[headerSize:]
-	p[0] = op
-	binary.BigEndian.PutUint32(p[1:5], uint32(len(key)))
-	copy(p[5:], key)
-	copy(p[5+len(key):], value)
-	binary.BigEndian.PutUint32(rec[0:4], uint32(n))
-	binary.BigEndian.PutUint32(rec[4:8], crc32.Checksum(p, castagnoli))
-	return rec
-}
-
-// appendRecord writes a record and waits until the disk has it (fsync). Callers hold the
-// write lock, so log order always equals the order changes reach memory.
-//
-// If the write or the fsync fails, part of the record may already be in the file. It is
-// cut back to the last good record before the error is returned; otherwise the next
-// successful write would land after garbage and be lost at the next replay (ADR-0018).
-func (s *Store) appendRecord(rec []byte) error {
+// appendBytes writes whole records and waits until the disk has them (fsync). Callers hold
+// the write lock. If the write or the fsync fails, part of it may already be in the file:
+// it is cut back to the last good record before the error is returned (ADR-0018).
+func (s *Store) appendBytes(b []byte) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	_, err := s.f.Write(rec)
+	_, err := s.f.Write(b)
 	if err == nil {
 		err = s.f.Sync()
 	}
 	if err == nil {
-		s.end += int64(len(rec))
+		s.end += int64(len(b))
 		return nil
 	}
 	if cerr := s.cutBack(); cerr != nil {
@@ -207,64 +348,235 @@ func (s *Store) appendRecord(rec []byte) error {
 	return err
 }
 
-// Put stores value under key. It returns only after the change is on disk.
-func (s *Store) Put(key string, value []byte) error {
-	if len(key)+len(value)+5 > maxRecord {
-		return errors.New("record too large")
+// Write appends the next record of the given epoch to the log and flushes it, but doesn't
+// apply it: a leader applies only after the write commits (ADR-0023), with Apply.
+func (s *Store) Write(epoch uint64, op byte, key string, value []byte) (Record, error) {
+	if len(key) > maxKey || bodyFixed+len(key)+len(value) > maxRecord {
+		return Record{}, errors.New("record too large")
 	}
-	v := append([]byte(nil), value...) // own copy: the caller may reuse its buffer
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.appendRecord(encode(opPut, key, v)); err != nil {
+	return s.writeLocked(epoch, op, key, value)
+}
+
+func (s *Store) writeLocked(epoch uint64, op byte, key string, value []byte) (Record, error) {
+	last, hash := s.lastLocked()
+	if epoch < last.Epoch {
+		return Record{}, fmt.Errorf("%w: %d < %d", ErrStaleEpoch, epoch, last.Epoch)
+	}
+	rec := Record{Epoch: epoch, LSN: last.LSN + 1, Prev: hash, Op: op, Key: key,
+		Value: append([]byte(nil), value...)} // own copy: the caller may reuse its buffer
+	b := rec.encode()
+	offset := s.end
+	if err := s.appendBytes(b); err != nil {
+		return Record{}, err
+	}
+	s.recs = append(s.recs, meta{offset: offset, epoch: epoch, hash: xxhash.Sum64(b)})
+	return rec, nil
+}
+
+// Apply makes a written record visible to reads (see Write).
+func (s *Store) Apply(rec Record) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.apply(rec)
+}
+
+// Replicate appends records received from the leader (bytes from its ReadAfter) and
+// applies them. Each record's checksum and hash link are checked first; records the log
+// already has are skipped. All of them are flushed with one fsync.
+func (s *Store) Replicate(raw []byte) error {
+	recs, err := DecodeRecords(raw)
+	if err != nil {
 		return err
 	}
-	s.data[key] = v
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, hash := s.lastLocked()
+	var buf []byte
+	var added []meta
+	offset := s.end
+	for i, rec := range recs {
+		if rec.LSN <= last.LSN {
+			continue // already have it
+		}
+		if rec.LSN != last.LSN+1 {
+			return fmt.Errorf("%w: LSN %d after %d", ErrGap, rec.LSN, last.LSN)
+		}
+		if rec.Prev != hash || rec.Epoch < last.Epoch {
+			return fmt.Errorf("%w at LSN %d", ErrBrokenChain, rec.LSN)
+		}
+		b := recs[i].encode() // identical to the leader's bytes: same fields, same layout
+		h := xxhash.Sum64(b)
+		added = append(added, meta{offset: offset + int64(len(buf)), epoch: rec.Epoch, hash: h})
+		buf = append(buf, b...)
+		last, hash = rec.Version(), h
+	}
+	if len(buf) == 0 {
+		return nil
+	}
+	if err := s.appendBytes(buf); err != nil {
+		return err
+	}
+	s.recs = append(s.recs, added...)
+	for _, rec := range recs[len(recs)-len(added):] {
+		s.apply(rec)
+	}
 	return nil
 }
 
-// Get returns the value for key and whether it exists.
-func (s *Store) Get(key string) ([]byte, bool) {
+// ReadAfter returns the bytes of up to max records with an LSN above lsn, and how many.
+func (s *Store) ReadAfter(lsn uint64, max int) ([]byte, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	v, ok := s.data[key]
-	return v, ok
+	if lsn >= uint64(len(s.recs)) || max <= 0 {
+		return nil, 0, nil
+	}
+	from := s.recs[lsn].offset
+	upto := uint64(len(s.recs))
+	if lsn+uint64(max) < upto {
+		upto = lsn + uint64(max)
+	}
+	to := s.end
+	if upto < uint64(len(s.recs)) {
+		to = s.recs[upto].offset
+	}
+	b := make([]byte, to-from)
+	if _, err := s.rf.ReadAt(b, from); err != nil {
+		return nil, 0, err
+	}
+	return b, int(upto - lsn), nil
+}
+
+// Last returns the version and hash of the last record (zeros for an empty log).
+func (s *Store) Last() (Version, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastLocked()
+}
+
+func (s *Store) lastLocked() (Version, uint64) {
+	n := len(s.recs)
+	if n == 0 {
+		return Version{}, 0
+	}
+	return Version{s.recs[n-1].epoch, uint64(n)}, s.recs[n-1].hash
+}
+
+// HashAt returns the hash of the record with the given LSN (0 for LSN 0) and whether the
+// log has it. A follower's last record is in this log only if both match.
+func (s *Store) HashAt(lsn uint64) (uint64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if lsn == 0 {
+		return 0, true
+	}
+	if lsn > uint64(len(s.recs)) {
+		return 0, false
+	}
+	return s.recs[lsn-1].hash, true
+}
+
+// LastLSNOfEpoch returns the LSN of the last record written in an epoch up to and
+// including epoch: where a returning replica of that epoch must cut its log (ADR-0023).
+func (s *Store) LastLSNOfEpoch(epoch uint64) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Epochs never decrease along the log, so the records of epochs <= epoch are a prefix.
+	return uint64(sort.Search(len(s.recs), func(i int) bool { return s.recs[i].epoch > epoch }))
+}
+
+// TruncateAfter cuts the log back so that lsn is its last record, and rebuilds the map
+// from what remains. Used when a returning replica holds records the leader doesn't.
+func (s *Store) TruncateAfter(lsn uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lsn >= uint64(len(s.recs)) {
+		return nil
+	}
+	s.end = s.recs[lsn].offset
+	if err := s.cutBack(); err != nil {
+		return err
+	}
+	_, err := s.replay(io.NewSectionReader(s.rf, 0, s.end), s.end)
+	return err
+}
+
+// Put writes and applies a value at once, in the log's current epoch. For stores that
+// aren't replicated (the coordinator's registry). It returns after the change is on disk.
+func (s *Store) Put(key string, value []byte) error {
+	if len(key) > maxKey || bodyFixed+len(key)+len(value) > maxRecord {
+		return errors.New("record too large")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, _ := s.lastLocked()
+	rec, err := s.writeLocked(last.Epoch, OpPut, key, value)
+	if err != nil {
+		return err
+	}
+	s.apply(rec)
+	return nil
 }
 
 // Delete removes key and reports whether it existed. A missing key writes nothing.
 func (s *Store) Delete(key string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[key]; !ok {
+	if e, ok := s.data[key]; !ok || e.Deleted {
 		return false, nil
 	}
-	if err := s.appendRecord(encode(opDelete, key, nil)); err != nil {
+	last, _ := s.lastLocked()
+	rec, err := s.writeLocked(last.Epoch, OpDelete, key, nil)
+	if err != nil {
 		return false, err
 	}
-	delete(s.data, key)
+	s.apply(rec)
 	return true, nil
 }
 
-// Keys returns every key (for listing tables; not used on hot paths).
+// Get returns the value for key and whether it exists (a tombstone doesn't).
+func (s *Store) Get(key string) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.data[key]
+	if !ok || e.Deleted {
+		return nil, false
+	}
+	return e.Value, true
+}
+
+// Lookup returns the key's entry, tombstones included, with its version.
+func (s *Store) Lookup(key string) (Entry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.data[key]
+	return e, ok
+}
+
+// Keys returns every live key (for listing tables; not used on hot paths).
 func (s *Store) Keys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	keys := make([]string, 0, len(s.data))
-	for k := range s.data {
-		keys = append(keys, k)
+	for k, e := range s.data {
+		if !e.Deleted {
+			keys = append(keys, k)
+		}
 	}
 	return keys
 }
 
-// Len returns the number of keys.
+// Len returns the number of live keys.
 func (s *Store) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.data)
+	return len(s.Keys())
 }
 
 // Close flushes and closes the log.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.f.Close()
+	err := s.f.Close()
+	s.rf.Close()
+	return err
 }

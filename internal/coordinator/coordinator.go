@@ -1,6 +1,7 @@
 // Package coordinator is the front door of the store: it serves the public API
 // (api/openapi.yaml), keeps the table registry, picks the shard for each item with the
-// consistent hashing ring and forwards the request there (ADR-0010 to ADR-0013).
+// consistent hashing ring (ADR-0010 to ADR-0013), sends writes to the shard's leader and
+// reads to a quorum of its replicas (ADR-0020, ADR-0021).
 package coordinator
 
 import (
@@ -12,7 +13,9 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
@@ -42,13 +45,16 @@ type Coordinator struct {
 	tables  *store.Store // table name -> JSON definition, persisted like shard data
 	members *Membership
 	client  *http.Client // to the shards: keep-alive connections, short timeout
+	r       int          // replicas each read asks (R, ADR-0021)
 }
 
-// New builds a coordinator. tables persists the registry; members tracks the shards.
-func New(tables *store.Store, members *Membership) *Coordinator {
+// New builds a coordinator. tables persists the registry; members tracks the replica
+// sets; r is the read quorum (2 with W = 2, 3 with W = 1).
+func New(tables *store.Store, members *Membership, r int) *Coordinator {
 	return &Coordinator{
 		tables:  tables,
 		members: members,
+		r:       r,
 		client: &http.Client{
 			Timeout: 3 * time.Second,
 			// The benchmark runs many requests in parallel; reuse connections to shards
@@ -58,8 +64,8 @@ func New(tables *store.Store, members *Membership) *Coordinator {
 	}
 }
 
-// Handler returns the coordinator's routes: the public API plus the internal shard
-// registration endpoints.
+// Handler returns the coordinator's routes: the public API plus the internal membership
+// endpoints.
 func (c *Coordinator) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", c.health)
@@ -75,14 +81,14 @@ func (c *Coordinator) Handler() http.Handler {
 		mux.HandleFunc("DELETE "+p, c.item)
 	}
 
-	mux.HandleFunc("POST /internal/v1/shards", c.registerShard)
+	mux.HandleFunc("POST /internal/v1/replicas", c.heartbeat)
 	mux.HandleFunc("GET /internal/v1/shards", c.listShards)
 	mux.HandleFunc("DELETE /internal/v1/shards/{id}", c.removeShard)
 	return mux
 }
 
 // health answers 200 only when the coordinator can serve requests, i.e. the expected
-// shards have registered; before that 503, so a load balancer or a script checking only
+// shards have registered and each has a leader; before that 503, so a load balancer or a script checking only
 // the status code doesn't send traffic too early. The body has the same fields either way.
 func (c *Coordinator) health(w http.ResponseWriter, r *http.Request) {
 	ready, n := c.members.Ready()
@@ -90,8 +96,13 @@ func (c *Coordinator) health(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		code, status = http.StatusServiceUnavailable, "unavailable"
 	}
+	failures := map[string]map[string]uint64{}
+	for _, s := range c.members.Status() {
+		failures[s.ID] = map[string]uint64{"unavailable503": s.Unavailable, "notCommitted504": s.NotCommitted}
+	}
 	httpx.WriteJSON(w, code, map[string]any{
 		"status": status, "role": "coordinator", "version": buildinfo.Version, "ready": ready, "shards": n,
+		"failures": failures,
 	})
 }
 
@@ -197,47 +208,128 @@ func (c *Coordinator) item(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ADR-0012: the shard is chosen by table + partition key; the sort key only names the item.
-	id, addr, available, ok := c.members.Owner(ring.RoutingKey(name, pk))
-	if !ok || !available {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "shard "+id+" is unavailable")
-		return
+	routing, path := ring.RoutingKey(name, pk), shard.KeyPath(shard.StorageKey(name, pk, sk))
+	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
+		c.write(w, r.Method, routing, path, body)
+	} else {
+		c.read(w, r.Method, routing, path)
 	}
-	c.forward(w, r.Method, addr+shard.KeyPath(shard.StorageKey(name, pk, sk)), body, id)
 }
 
-// forward sends the item request to the shard and relays its status (and body for READ).
-func (c *Coordinator) forward(w http.ResponseWriter, method, url string, body []byte, shardID string) {
-	req, err := http.NewRequest(method, url, bytes.NewReader(body))
-	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+// write sends a put or delete to the shard's leader and relays the answer (ADR-0021).
+func (c *Coordinator) write(w http.ResponseWriter, method string, routing []byte, path string, body []byte) {
+	id, addr, ok := c.members.WriteTarget(routing)
+	if !ok {
+		c.fail(w, id, http.StatusServiceUnavailable, "shard "+id+" has no live leader")
 		return
 	}
+	req, _ := http.NewRequest(method, addr+path, bytes.NewReader(body))
 	resp, err := c.client.Do(req)
 	if err != nil {
 		// Alive by heartbeat but not answering: same honest answer, try later.
-		httpx.WriteError(w, http.StatusServiceUnavailable, "shard "+shardID+" did not answer")
+		c.fail(w, id, http.StatusServiceUnavailable, "leader of "+id+" did not answer")
 		return
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		if method == http.MethodHead {
-			w.WriteHeader(http.StatusNotFound)
-		} else {
-			httpx.WriteError(w, http.StatusNotFound, "item not found")
-		}
-	case resp.StatusCode >= 300:
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		httpx.WriteError(w, resp.StatusCode, "shard "+shardID+": "+strings.TrimSpace(string(msg)))
-	default:
-		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
 		w.WriteHeader(resp.StatusCode)
-		if method == http.MethodGet {
-			io.Copy(w, resp.Body)
+	case http.StatusNotFound:
+		httpx.WriteError(w, http.StatusNotFound, "item not found")
+	case http.StatusConflict: // leadership moved between our lookup and its answer
+		c.fail(w, id, http.StatusServiceUnavailable, "leader of "+id+" changed; retry")
+	case http.StatusGatewayTimeout:
+		c.fail(w, id, http.StatusGatewayTimeout, "shard "+id+": "+strings.TrimSpace(string(msg)))
+	default:
+		httpx.WriteError(w, resp.StatusCode, "shard "+id+": "+strings.TrimSpace(string(msg)))
+	}
+}
+
+// answer is one replica's reply to a read.
+type answer struct {
+	found   bool
+	version store.Version // zero when the replica never had the key
+	body    []byte
+}
+
+// read asks R live replicas of the shard (rotating, ADR-0021) and returns the answer
+// with the newest version; a tombstone or "never had it" is 404. A replica that doesn't
+// answer is replaced by the next live one; fewer than R answers is 503.
+func (c *Coordinator) read(w http.ResponseWriter, method string, routing []byte, path string) {
+	id, addrs := c.members.ReadTargets(routing)
+	var answers []answer
+	for len(answers) < c.r && len(addrs) > 0 {
+		n := min(c.r-len(answers), len(addrs))
+		batch := addrs[:n]
+		addrs = addrs[n:]
+		got := make([]*answer, n)
+		var wg sync.WaitGroup
+		for i, addr := range batch {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got[i] = c.ask(method, addr+path)
+			}()
+		}
+		wg.Wait()
+		for _, a := range got {
+			if a != nil {
+				answers = append(answers, *a)
+			}
 		}
 	}
+	if len(answers) < c.r {
+		c.fail(w, id, http.StatusServiceUnavailable,
+			fmt.Sprintf("shard %s: %d of %d replicas answered", id, len(answers), c.r))
+		return
+	}
+	newest := answers[0]
+	for _, a := range answers[1:] {
+		if newest.version.Less(a.version) {
+			newest = a
+		}
+	}
+	switch {
+	case !newest.found && method == http.MethodHead:
+		w.WriteHeader(http.StatusNotFound)
+	case !newest.found:
+		httpx.WriteError(w, http.StatusNotFound, "item not found")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if method == http.MethodGet {
+			w.Write(newest.body)
+		}
+	}
+}
+
+// ask reads one replica; nil means it didn't give a usable answer.
+func (c *Coordinator) ask(method, url string) *answer {
+	req, _ := http.NewRequest(method, url, nil)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return nil
+	}
+	a := &answer{found: resp.StatusCode == http.StatusOK}
+	a.version.Epoch, _ = strconv.ParseUint(resp.Header.Get(shard.HeaderEpoch), 10, 64)
+	a.version.LSN, _ = strconv.ParseUint(resp.Header.Get(shard.HeaderLSN), 10, 64)
+	if a.found && method == http.MethodGet {
+		if a.body, err = io.ReadAll(resp.Body); err != nil {
+			return nil
+		}
+	}
+	return a
+}
+
+// fail answers an error and counts 503s and 504s per shard.
+func (c *Coordinator) fail(w http.ResponseWriter, shardID string, status int, msg string) {
+	c.members.count(shardID, status)
+	httpx.WriteError(w, status, msg)
 }
 
 // checkKeyValue enforces the key rules from api/openapi.yaml, plus "no zero bytes": the
@@ -268,17 +360,23 @@ func readJSONObject(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// --- shard registration (internal) ----------------------------------------------------
+// --- membership (internal) ------------------------------------------------------------
 
-func (c *Coordinator) registerShard(w http.ResponseWriter, r *http.Request) {
-	var reg shard.Registration
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&reg); err != nil ||
-		!validName.MatchString(reg.ID) || !strings.HasPrefix(reg.Address, "http") {
-		httpx.WriteError(w, http.StatusBadRequest, "body must be {id, address}")
+// heartbeat records a replica's report and answers with its set's epoch and leader.
+func (c *Coordinator) heartbeat(w http.ResponseWriter, r *http.Request) {
+	var hb shard.Heartbeat
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&hb); err != nil ||
+		!validName.MatchString(hb.Shard) || !validName.MatchString(hb.Replica) ||
+		!strings.HasPrefix(hb.Address, "http") {
+		httpx.WriteError(w, http.StatusBadRequest, "body must be {shard, replica, address, epoch, last}")
 		return
 	}
-	c.members.Register(reg.ID, reg.Address)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"registered": reg.ID})
+	answer, err := c.members.Heartbeat(hb)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, answer)
 }
 
 func (c *Coordinator) listShards(w http.ResponseWriter, r *http.Request) {

@@ -12,42 +12,49 @@ info:
 
 servers:
   - url: http://localhost:8080
-    description: coordinator (registration endpoints) or a shard (key-value endpoints)
+    description: coordinator (membership endpoints) or a shard replica (key-value and log endpoints)
 
 paths:
-  # --- On the coordinator: shard membership --------------------------------------------
-  /internal/v1/shards:
+  # --- On the coordinator: replica sets ------------------------------------------------
+  /internal/v1/replicas:
     post:
-      summary: Register a shard, or heartbeat
+      summary: A replica's heartbeat
       description: >-
-        Every shard calls this at start and then every 5 seconds. An unknown ID is added to
-        the ring; a known one has its address and last-seen time updated. A shard silent for
-        15 seconds is marked unavailable (its keys answer 503) but stays on the ring.
-      operationId: registerShard
+        Every replica calls this at start and then every 5 seconds with its last durable
+        record (ADR-0020). An unknown shard joins the ring. A set without a leader gets one
+        once all its replicas have reported, or a majority has for 15 s: the one with the
+        newest last record (on a tie, the configured first leader).
+        The answer is the set's epoch and leader; a replica takes its role from it. A
+        replica silent for 15 seconds is unavailable; a silent leader is replaced
+        automatically once both followers answer.
+      operationId: replicaHeartbeat
       tags: [coordinator]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/Registration" }
+            schema: { $ref: "#/components/schemas/Heartbeat" }
       responses:
         "200":
-          description: Registered (or heartbeat recorded)
+          description: Recorded; the set's current epoch and leader (epoch 0 while it has none)
           content:
             application/json:
-              schema:
-                type: object
-                required: [registered]
-                properties:
-                  registered: { type: string, description: the shard ID }
+              schema: { $ref: "#/components/schemas/HeartbeatAnswer" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "500":
+          description: The leader assignment couldn't be saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /internal/v1/shards:
     get:
-      summary: List the shards on the ring
+      summary: List the replica sets on the ring
       operationId: listShards
       tags: [coordinator]
       responses:
         "200":
-          description: Every shard the coordinator knows, sorted by ID
+          description: Every shard the coordinator knows, sorted by ID, with its replicas
           content:
             application/json:
               schema:
@@ -58,9 +65,9 @@ paths:
     delete:
       summary: Take a shard off the ring
       description: >-
-        Its keys move to the next shards clockwise, without their data (no migration in
-        M2). Not permanent: if the shard is still running, its next heartbeat adds it back,
-        so stop the shard first. Membership lives in the coordinator's memory only.
+        Its keys move to the next shards clockwise, without their data (no migration yet),
+        and its leader assignment is forgotten. Not permanent: if its replicas are still
+        running, their next heartbeat adds it back, so stop them first.
       operationId: removeShard
       tags: [coordinator]
       parameters:
@@ -81,8 +88,11 @@ paths:
           The shard treats it as opaque bytes.
         schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
     put:
-      summary: Store a value (create or replace)
-      description: Returns only after the record is in the shard's log on disk (fsync).
+      summary: Store a value (create or replace) — on the leader only
+      description: >-
+        The leader appends the record to its log and flushes it, then waits until W
+        replicas have it on disk (itself and, with W = 2, one follower) before answering
+        and before the value becomes readable (ADR-0021, ADR-0023).
       operationId: shardPut
       tags: [shard]
       requestBody:
@@ -92,8 +102,10 @@ paths:
           application/json:
             schema: { type: object }
       responses:
-        "200": { description: Stored and on disk }
+        "200": { description: Committed (on W replicas' disks) }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/NotLeader" }
+        "504": { $ref: "#/components/responses/NotCommitted" }
         "413":
           description: Value larger than 1 MiB
           content:
@@ -101,17 +113,27 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/WriteFailed" }
     get:
-      summary: Read a value
+      summary: Read a value, with its version
+      description: Any replica answers reads; the coordinator compares versions (ADR-0021).
       operationId: shardGet
       tags: [shard]
       responses:
         "200":
           description: The stored value, byte for byte
+          headers:
+            X-KV-Epoch: { $ref: "#/components/headers/VersionEpoch" }
+            X-KV-LSN: { $ref: "#/components/headers/VersionLSN" }
           content:
             application/json:
               schema: { type: object }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { description: No such key (no body) }
+        "404":
+          description: >-
+            No such key (no body). With version headers it's a tombstone: deleted at that
+            version; without them the key was never written here.
+          headers:
+            X-KV-Epoch: { $ref: "#/components/headers/VersionEpoch" }
+            X-KV-LSN: { $ref: "#/components/headers/VersionLSN" }
     head:
       summary: Check that a key exists
       operationId: shardExists
@@ -121,42 +143,112 @@ paths:
         "400": { description: Key is not base64url }
         "404": { description: No such key }
     delete:
-      summary: Delete a key
+      summary: Delete a key — on the leader only (leaves a tombstone)
       operationId: shardDelete
       tags: [shard]
       responses:
-        "204": { description: Deleted and on disk }
+        "204": { description: Deleted, committed like a put }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: No such key (nothing written) }
+        "409": { $ref: "#/components/responses/NotLeader" }
+        "504": { $ref: "#/components/responses/NotCommitted" }
         "500": { $ref: "#/components/responses/WriteFailed" }
+
+  /internal/v1/log:
+    get:
+      summary: Pull the leader's log (followers call this)
+      description: >-
+        The follower sends the epoch, LSN and hash of its last durable record (ADR-0023).
+        If that record isn't in the leader's log, the answer is empty with X-KV-Truncate-To:
+        cut back to that LSN and ask again. Otherwise the LSN counts as the follower's ack,
+        and the answer is up to `max` records after it, raw as in the log (ADR-0022); if
+        there are none, the leader holds the request up to 5 s and then answers empty.
+      operationId: shardLog
+      tags: [shard]
+      parameters:
+        - { name: replica, in: query, required: true, schema: { type: string }, description: the follower's replica ID }
+        - { name: epoch, in: query, required: true, schema: { type: integer, minimum: 0 }, description: epoch of its last record }
+        - { name: lsn, in: query, required: true, schema: { type: integer, minimum: 0 }, description: LSN of its last record (its ack) }
+        - { name: hash, in: query, required: true, schema: { type: string, pattern: "^[0-9a-f]{1,16}$" }, description: xxhash64 of its last record, hex }
+        - { name: max, in: query, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Records (possibly none), or an instruction to cut back
+          headers:
+            X-KV-Epoch: { description: the leader's epoch, schema: { type: integer } }
+            X-KV-Last: { description: the leader's last LSN, schema: { type: integer } }
+            X-KV-Truncate-To: { description: "present only when the follower must cut its log back to this LSN", schema: { type: integer } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/NotLeader" }
 
 components:
   schemas:
-    Registration:
+    Version:
       type: object
-      required: [id, address]
+      required: [epoch, lsn]
       properties:
-        id:
-          type: string
-          pattern: "^[A-Za-z0-9_.-]{1,128}$"
-          description: Stable across restarts; decides the shard's points on the ring
-        address:
-          type: string
-          description: Base URL the coordinator calls, e.g. http://10.20.64.12:8080
+        epoch: { type: integer, minimum: 0 }
+        lsn: { type: integer, minimum: 0 }
+    Heartbeat:
+      type: object
+      required: [shard, replica, address]
+      properties:
+        shard: { type: string, pattern: "^[A-Za-z0-9_.-]{1,128}$", description: "replica set, e.g. shard-1" }
+        replica: { type: string, pattern: "^[A-Za-z0-9_.-]{1,128}$", description: "stable replica ID, e.g. 1a" }
+        address: { type: string, description: "base URL the coordinator and other replicas call, e.g. http://10.20.64.12:8081" }
+        epoch: { type: integer, minimum: 0, description: newest epoch this replica has heard of }
+        last: { $ref: "#/components/schemas/Version" }
+    HeartbeatAnswer:
+      type: object
+      required: [epoch, leader, leaderAddress]
+      properties:
+        epoch: { type: integer, minimum: 0 }
+        leader: { type: string }
+        leaderAddress: { type: string, description: empty until the leader has reported }
     ShardStatus:
       type: object
-      required: [id, address, available, silentFor]
+      required: [id, epoch, leader, replicas, unavailable503, notCommitted504]
       properties:
         id: { type: string }
-        address: { type: string }
-        available: { type: boolean, description: false after 15 s without a heartbeat }
-        silentFor: { type: string, description: time since the last heartbeat, e.g. "3s" }
+        epoch: { type: integer }
+        leader: { type: string }
+        unavailable503: { type: integer, description: item requests for this shard answered 503 }
+        notCommitted504: { type: integer, description: writes for this shard answered 504 }
+        replicas:
+          type: array
+          items:
+            type: object
+            required: [id, address, available, silentFor, last]
+            properties:
+              id: { type: string }
+              address: { type: string }
+              available: { type: boolean, description: false after 15 s without a heartbeat }
+              silentFor: { type: string, description: time since the last heartbeat, e.g. "3s" }
+              last: { $ref: "#/components/schemas/Version" }
     Error:
       type: object
       required: [error]
       properties:
         error: { type: string }
+  headers:
+    VersionEpoch: { description: "the key's version: epoch", schema: { type: integer } }
+    VersionLSN: { description: "the key's version: LSN", schema: { type: integer } }
   responses:
+    NotLeader:
+      description: This replica isn't the leader of the current epoch
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotCommitted:
+      description: >-
+        No follower had the write within the commit timeout (2 s). It is in the leader's
+        log and may still become visible: outcome unknown (ADR-0021).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadRequest:
       description: Malformed request (bad JSON, bad ID or address, key not base64url)
       content:

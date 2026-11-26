@@ -123,9 +123,10 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
       - name: app stack with AppVersion = the release
-        # CLIENT_CIDR: who may call the coordinator from outside. The repo variable
-        # ALLOWED_CLIENT_CIDR (my laptop's IP) if set, else only the VPC itself.
-        run: make up-app ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION} CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR || '10.20.0.0/16' }}"
+        # CLIENT_CIDR: who may call the coordinator from outside the VPC: the repo variable
+        # ALLOWED_CLIENT_CIDR (my laptop's IP) if set, else nobody (empty). Never the VPC's
+        # own range: the template has that rule already (M3 task 6.4).
+        run: make up-app ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION} CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR }}"
 
   smoke:
     name: smoke test (on the coordinator, via SSM)
@@ -144,3 +145,7 @@ jobs:
       # so a deploy that changed nothing can't pass by reporting the old version.
       - name: every node runs the release; create table, put, read, exists, delete
         run: make smoke-aws ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION}
+      # M3 task 7.1: stops a node that runs no leader (one follower of each shard), checks
+      # that puts commit and read back, starts it and waits until it has caught up.
+      - name: one follower per shard down; puts still commit and read back
+        run: make smoke-replica ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION}

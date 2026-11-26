@@ -23,8 +23,8 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down smoke \
-        up-artifacts release up-app down-app app-url smoke-aws bench-aws
+.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down rebuild-replica smoke \
+        up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
@@ -112,16 +112,25 @@ rebuild:         ## timed teardown + rebuild (for docs/m1/recreate-log.md)
 	end=$$(date +%s); \
 	echo "teardown: $$((mid-start))s  rebuild: $$((end-mid))s  total: $$((end-start))s"
 
-# --- M2: the Go app, locally -------------------------------------------------------------
+# --- The Go app, locally (M2, M3) ----------------------------------------------------------
 
 test:            ## go vet + all Go tests (incl. contract test and ring distribution)
 	go vet ./... && go test ./...
 
-local-up:        ## build the image and start coordinator + 2 shards in Docker
+local-up:        ## build the image and start coordinator + 2 shards x 3 replicas in Docker
 	docker compose up --build -d
 
 local-down:      ## stop the local cluster (add -v to docker compose down to wipe data)
 	docker compose down
+
+# A replica whose log is damaged in the middle refuses to start (ADR-0018). Rebuild it:
+# remove its container and volume, start it empty, and it pulls the leader's whole log
+# (ADR-0023 step 6). Never for a shard's only live copy.
+rebuild-replica: ## wipe one local replica and resync it from its leader (R=1b)
+	@test -n "$(R)" || { echo "usage: make rebuild-replica R=<replica, e.g. 1b>"; exit 1; }
+	docker compose rm --stop --force r$(R)
+	docker volume rm kv-r$(R)-data
+	docker compose up -d r$(R)
 
 smoke:           ## the four operations against a running coordinator (BASE=http://...)
 	scripts/smoke.sh $(or $(BASE),http://localhost:8080)
@@ -129,6 +138,7 @@ smoke:           ## the four operations against a running coordinator (BASE=http
 # --- M2: releases and the app in AWS (ADR-0009, ADR-0014) --------------------------------
 
 BUCKET = $(shell $(CFN) list-exports --query "Exports[?Name=='$(ARTIFACTS_STACK)-BucketName'].Value" --output text)
+comma := ,
 CLIENT_CIDR ?= $(shell curl -s https://checkip.amazonaws.com)/32
 
 up-artifacts:    ## create/update the S3 artifacts stack (once; it stays)
@@ -139,7 +149,7 @@ up-artifacts:    ## create/update the S3 artifacts stack (once; it stays)
 # a commit, or AppVersion=<sha> would lie about what runs.
 release:         ## build + upload the image of the current commit (VERSION=<sha>)
 	@set -euo pipefail; \
-	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh scripts/smoke.sh)" ]; then \
+	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh scripts/smoke.sh scripts/smoke-replica.sh)" ]; then \
 	  echo "uncommitted changes in app files: commit first, a release is named by its commit"; exit 1; fi; \
 	[ -n "$(BUCKET)" ] || { echo "no artifacts bucket: run make up-artifacts"; exit 1; }; \
 	if $(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null 2>&1; then \
@@ -148,10 +158,12 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	docker save capstone-kv:$(VERSION) | gzip | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz; \
 	$(AWS) s3 cp scripts/node-boot.sh s3://$(BUCKET)/releases/$(VERSION)/node-boot.sh; \
 	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \
+	$(AWS) s3 cp scripts/smoke-replica.sh s3://$(BUCKET)/releases/$(VERSION)/smoke-replica.sh; \
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
 BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
 EXPECTED_SHARDS ?= 2
+W ?= 2           # write quorum (ADR-0021): 2, or 1 for the benchmark's W = 1 run
 # The AMI is pinned per stack (ADR-0017). IMAGE_ID=ami-... upgrades it deliberately (the
 # change set then shows every instance being replaced); otherwise a new stack gets the
 # current Amazon Linux 2023 ID once, and an existing stack keeps the one it has.
@@ -168,7 +180,7 @@ up-app:          ## deploy the app stack running VERSION (BENCH=true adds the cl
 	else image="ParameterKey=ImageId,ParameterValue=$$($(AWS) ssm get-parameter --name $(AMI_PARAMETER) --query Parameter.Value --output text)"; fi; \
 	echo "AMI: $$image"; \
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) $$image"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) $(if $(strip $(CLIENT_CIDR)),ParameterKey=AllowedClientCidr$(comma)ParameterValue=$(strip $(CLIENT_CIDR))) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
@@ -199,6 +211,45 @@ smoke-aws:       ## smoke test on the coordinator via SSM: every node must run V
 	status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query Status --output text); \
 	echo "SSM status: $$status"; [ "$$status" = Success ]
 
+# smoke-replica (M3 task 7.1): stop a shard node that runs no leader, so one follower of each
+# shard is down; check through the coordinator that puts still commit and read back; start
+# the node and wait until its replicas have caught up. The checks are scripts/smoke-replica.sh
+# of the deployed release, run on the coordinator through SSM, as in smoke-aws. The nodes
+# have no SSM route, so the whole instance is stopped. It is started again even when a check
+# fails (trap). A release from before M3 has no such script: skipped.
+smoke-replica:   ## smoke test with one follower per shard down (stops and restarts a node)
+	@set -euo pipefail; \
+	coord=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='CoordinatorInstanceId'].OutputValue" --output text); \
+	ver=$(VERSION); script=s3://$(BUCKET)/releases/$$ver/smoke-replica.sh; \
+	$(AWS) s3 ls $$script >/dev/null 2>&1 || { echo "release $$ver has no smoke-replica.sh (before M3): skipped"; exit 0; }; \
+	onCoord() { \
+	  cmd=$$($(AWS) ssm send-command --instance-ids $$coord --document-name AWS-RunShellScript \
+	    --comment "capstone-kv smoke-replica $$ver $$1" \
+	    --parameters "commands=[\"aws s3 cp $$script /tmp/smoke-replica.sh --quiet --region $(REGION)\",\"bash /tmp/smoke-replica.sh http://localhost:8080 $$*\"]" \
+	    --query Command.CommandId --output text); \
+	  for i in $$(seq 100); do \
+	    st=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$coord --query Status --output text 2>/dev/null || echo Pending); \
+	    case $$st in Pending|InProgress|Delayed) sleep 3;; *) break;; esac; done; \
+	  $(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$coord --query StandardOutputContent --output text; \
+	  [ "$$st" = Success ] || { echo "SSM status: $$st" >&2; return 1; }; }; \
+	host=$$(onCoord pick); \
+	node=$$($(AWS) ec2 describe-instances --filters Name=private-ip-address,Values=$$host \
+	  Name=tag:aws:cloudformation:stack-name,Values=$(APP_STACK) Name=instance-state-name,Values=running \
+	  --query "Reservations[0].Instances[0].InstanceId" --output text); \
+	case $$node in i-*) ;; *) echo "FAIL no running node at $$host"; exit 1;; esac; \
+	started=no; \
+	start() { [ $$started = yes ] && return 0; started=yes; echo "starting $$node"; \
+	  $(AWS) ec2 start-instances --instance-ids $$node >/dev/null; \
+	  $(AWS) ec2 wait instance-running --instance-ids $$node; }; \
+	trap start EXIT; \
+	echo "stopping node $$node ($$host): one follower of each shard"; \
+	$(AWS) ec2 stop-instances --instance-ids $$node >/dev/null; \
+	$(AWS) ec2 wait instance-stopped --instance-ids $$node; \
+	onCoord down $$host; \
+	start; \
+	onCoord up $$host; \
+	echo "smoke-replica passed"
+
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,
 # runs bench.sh on the client through SSM and waits (polling: a full run takes ~40 min,
@@ -206,6 +257,8 @@ smoke-aws:       ## smoke test on the coordinator via SSM: every node must run V
 # evidence 63), so the summaries come back in the SSM output; this target saves them to
 # bench-results/<sha>/<time>.txt and uploads that file to S3 with its own credentials.
 RUNS ?= 3
+WORKLOADS ?= a b # M3 variants: WORKLOADS=a LABEL=w1 (or LABEL=follower-down)
+LABEL ?=
 
 bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=true)
 	@set -euo pipefail; \
@@ -222,15 +275,15 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	  sleep 10; done; \
 	cmd=$$($(AWS) ssm send-command --instance-ids $$client --document-name AWS-RunShellScript \
 	  --comment "capstone-kv benchmark $(VERSION)" --timeout-seconds 600 \
-	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS)\"]" \
+	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS) '$(strip $(WORKLOADS))'\"]" \
 	  --query Command.CommandId --output text); \
 	echo "SSM command $$cmd started $$(date -u +%T) UTC; polling every 30 s"; \
 	while :; do \
 	  status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null || echo Pending); \
 	  case $$status in Pending|InProgress|Delayed) sleep 30;; *) break;; esac; \
 	done; \
-	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ).txt; mkdir -p bench-results/$(VERSION); \
-	{ echo "release $(VERSION), client $$client -> $$url, runs per workload: $(RUNS), SSM status: $$status"; \
+	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ)$(if $(LABEL),-$(LABEL)).txt; mkdir -p bench-results/$(VERSION); \
+	{ echo "release $(VERSION), client $$client -> $$url, workloads: $(strip $(WORKLOADS)), runs per workload: $(RUNS), label: $(or $(LABEL),-), SSM status: $$status"; \
 	  $(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query StandardOutputContent --output text; } > $$result; \
 	cat $$result; \
 	$(AWS) s3 cp $$result s3://$(BUCKET)/$$result --quiet; \

@@ -49,7 +49,7 @@ jobs:
       - name: release of this commit (built only if missing)
         run: make release
       - name: app stack with the benchmark client
-        run: make up-app BENCH=true CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR || '10.20.0.0/16' }}"
+        run: make up-app BENCH=true CLIENT_CIDR="${{ vars.ALLOWED_CLIENT_CIDR }}"
       - name: workloads A and B on the client
         run: make bench-aws RUNS=${{ inputs.runs }}
       - name: keep the raw outputs

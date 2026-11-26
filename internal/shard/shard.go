@@ -1,23 +1,16 @@
-// Package shard is the storage node: it keeps keys in a store and serves them to the
-// coordinator over internal endpoints, and it registers itself with the coordinator at
-// start and every few seconds after that (ADR-0013).
+// Package shard is the storage node: one replica of a shard's replica set (ADR-0020). It
+// keeps keys in a store, serves them to the coordinator over internal endpoints, ships its
+// log to followers when it leads, and reports to the coordinator every few seconds.
 //
 // The shard knows nothing about tables or key shapes: the coordinator sends it one opaque
-// storage key per item. Only the coordinator is allowed to reach it (security group,
-// ADR-0014).
+// storage key per item. Only the coordinator and the other replicas may reach it (security
+// group, ADR-0020).
 package shard
 
 import (
-	"bytes"
-	"context"
 	"encoding/base64"
-	"encoding/json"
-	"io"
-	"log"
 	"net/http"
-	"time"
 
-	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
@@ -37,62 +30,10 @@ func KeyPath(storageKey string) string {
 	return "/internal/v1/kv/" + base64.RawURLEncoding.EncodeToString([]byte(storageKey))
 }
 
-// Handler returns the shard's HTTP routes, backed by st.
+// Handler returns the routes of a replica set of one, backed by st: the M2 shard, kept
+// for running without replication (and for the coordinator's tests until M3's group 4).
 func Handler(st *store.Store) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "role": "shard", "version": buildinfo.Version, "keys": st.Len()})
-	})
-	// A "GET" pattern also matches HEAD requests; the handler tells them apart.
-	mux.HandleFunc("GET /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		v, found := st.Get(key)
-		if !found {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK) // EXISTS: status only, no body
-			return
-		}
-		w.Write(v)
-	})
-	mux.HandleFunc("PUT /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxValue))
-		if err != nil {
-			httpx.WriteError(w, http.StatusRequestEntityTooLarge, "value larger than 1 MiB")
-			return
-		}
-		if err := st.Put(key, body); err != nil {
-			httpx.WriteError(w, http.StatusInternalServerError, "write failed: "+err.Error())
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("DELETE /internal/v1/kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := decodeKey(w, r)
-		if !ok {
-			return
-		}
-		existed, err := st.Delete(key)
-		switch {
-		case err != nil:
-			httpx.WriteError(w, http.StatusInternalServerError, "delete failed: "+err.Error())
-		case !existed:
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	})
-	return mux
+	return NewStandalone(st).Handler()
 }
 
 func decodeKey(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -102,42 +43,4 @@ func decodeKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return string(b), true
-}
-
-// Registration is what a shard tells the coordinator about itself.
-type Registration struct {
-	ID      string `json:"id"`      // stable across restarts: decides ring positions
-	Address string `json:"address"` // base URL the coordinator calls, e.g. http://10.20.64.12:8080
-}
-
-// RegisterLoop announces reg to the coordinator now and then every interval, until ctx is
-// cancelled. Failures are logged and retried on the next tick: the coordinator may start
-// later than the shard, or restart.
-func RegisterLoop(ctx context.Context, coordinatorURL string, reg Registration, interval time.Duration) {
-	body, _ := json.Marshal(reg)
-	client := &http.Client{Timeout: 2 * time.Second}
-	send := func() {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, coordinatorURL+"/internal/v1/shards", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("register with %s: %v", coordinatorURL, err)
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("register with %s: status %d", coordinatorURL, resp.StatusCode)
-		}
-	}
-	send()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			send()
-		}
-	}
 }
