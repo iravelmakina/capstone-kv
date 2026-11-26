@@ -45,8 +45,9 @@
 ## 6. Infrastructure
 
 - [x] 6.1 `infra/app.yaml`: 3 shard instances in the 3 AZs, two replica containers each on different ports; shard security group allows its own members and the coordinator; `cfn-lint` passes
-- [ ] 6.2 First M3 deploy (author approves each write call): all 5 instances healthy; placement and security groups checked; `make down-app` afterwards
-- [ ] 6.3 Evidence in `docs/m3/evidence/aws-deploy.txt`
+- [x] 6.2 First M3 deploy (author approves each write call): all 5 instances healthy; placement and security groups checked; `make down-app` afterwards
+- [x] 6.3 Evidence in `docs/m3/evidence/aws-deploy.txt`
+- [ ] 6.4 Fix found in the first M3 AWS session (evidence §A9): the coordinator's "from the VPC" and "from the client" rules become separate ingress resources, and the client CIDR is optional (the pipeline passes none), so a pipeline deploy and a laptop deploy can't remove the VPC rule; `cfn-lint` passes
 
 ## 7. CI/CD
 

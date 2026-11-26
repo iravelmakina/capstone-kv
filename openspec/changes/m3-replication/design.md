@@ -120,3 +120,10 @@ endpoint and is not exposed to clients.
 - [Two replicas per t3.small] → noisy neighbours noted with the benchmark.
 - [Logs never compact] → fine at benchmark scale.
 - [Budget] → Docker first, short AWS sessions, `make down-app` after each.
+- [The pipeline on `main` and manual M3 deploys share one app stack: a merge into `main`
+  redeploys M2 over M3 (it happened, evidence §A8)] → no merge into `main` during a manual
+  AWS session; M3 is merged into `main` once its AWS runs are done, and the pipeline then
+  deploys M3 itself.
+- [The coordinator's two ingress rules collapsed into one when the client CIDR equalled the
+  VPC CIDR, and a later deploy removed both (evidence §A9)] → separate rule resources, client
+  rule optional (task 6.4).
