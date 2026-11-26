@@ -3,7 +3,8 @@
 KSE Cloud Architectures 2026/27 capstone: a small DynamoDB-like key-value store, built
 over five milestones in the **AWS Academy sandbox**.
 The full course brief (all milestones) is `docs/course/capstone-brief.md`. **The brief
-wins** over anything here. The current milestone is M2, OpenSpec change `m2-sharding` (M1 is archived).
+wins** over anything here. The current milestone is M3, OpenSpec change `m3-replication`, merged into `main` and
+waiting for its defense; M2 (`m2-sharding`) gets archived after its defense, task 1.1 (M1 is archived).
 
 ## Integrity rules (breaking them counts as plagiarism)
 
@@ -40,6 +41,7 @@ openspec/          OpenSpec root; one change per milestone in changes/
 docs/adr/          ADRs, NNNN-title.md
 docs/m1/           M1 evidence: dissection, quotas, budget, recreate log, AI review
 docs/m2/           M2 evidence: ring distribution, benchmark, pipeline runs, AI review
+docs/m3/           M3 evidence: local failure tests, AWS sessions, benchmark, cost, AI review
 docs/course/       course brief
 infra/             CloudFormation templates (only after spec approval)
 cmd/, internal/    Go code: one binary, coordinator and shard roles (from M2)
@@ -51,6 +53,6 @@ AGENT_WORKLOG.md   agent log (graded)
 ## Commands
 
 ```bash
-npx -y @fission-ai/openspec@1.16.0 status --change m2-sharding
-npx -y @fission-ai/openspec@1.16.0 validate m2-sharding --strict
+npx -y @fission-ai/openspec@1.16.0 status --change m3-replication
+npx -y @fission-ai/openspec@1.16.0 validate m3-replication --strict
 ```

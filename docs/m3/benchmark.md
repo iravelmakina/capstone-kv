@@ -1,7 +1,7 @@
 # M3 benchmark: replication against the M2 baseline
 
-> **Draft**, written by Claude Code from the runs of 2026-11-25/26; the author reviews it
-> and rewrites the explanations in her own words.
+> Written by Claude Code from the runs of 2026-11-25/26, at the author's request; the
+> author reviews it before the defense (see `AGENT_WORKLOG.md`).
 
 Same benchmark as M2 (ADR-0016), so the numbers compare directly. Raw summaries, git-ignored
 locally and kept under the same paths in the artifacts bucket:
@@ -38,7 +38,7 @@ W = 2 run of workload A, to show how much two deployments of the same thing diff
 | UPDATE avg / p95 / p99 | 15.26 / 28.03 / 32.59 | 17.83 / 32.45 / 39.04 | 18.05 / 32.77 / 39.39 | 16.09 / 29.58 / 35.33 | 18.05 / 32.34 / 39.01 |
 
 Against M2, W = 2: throughput −14%, update p99 +20–21% (both sessions agree); read p99 +64%
-in session 1 but only +5% in session 2 (see "Why p99 changed", point 2).
+in session 1 but only +5% in session 2 (see "Why p99 changed", Reads).
 
 ### Workload B — 95% read / 5% update (session 1 only)
 
@@ -67,40 +67,42 @@ the freshly started instances; the rest are within 1–2%. **No failed requests*
 
 ## Why p99 changed
 
-1. **A write now waits for a second disk and a network round trip.** With W = 2 the leader
-   flushes the record, a follower's long-poll returns it (one hop), the follower flushes it
-   and acks with its next pull (one hop back), and only then does the leader answer
-   (ADR-0023). Workload B shows the cost best, because its updates rarely queue: the
-   average update went from 4.5 to 8.2 ms, about one more fsync (~2 ms in M2) plus a
-   cross-AZ round trip. In workload A updates queue behind each other on the leader as in
-   M2, so the extra time is a smaller share: p99 +20%, the same in both sessions.
-2. **A read now waits for the slower of two replicas, but by less than session 1
-   suggested.** With R = 2 the coordinator asks two replicas and answers when both have,
-   so its latency is the maximum of two and the tail grows more than the average. In
-   session 1 read p99 in A rose from 6.2 to 10.3 ms; in session 2, the same release and
-   settings on new instances, to 6.6 ms. Throughput and update latency matched within 1%,
-   so the read tail is the figure most sensitive to the machines a deployment lands on
-   (other tenants on the host, the state of new gp3 volumes). The honest summary: R = 2
-   costs reads +5% to +64% at p99 depending on the deployment, and one session is not
-   enough to say more. Workload B (session 1 only) showed +51%.
-3. **W = 1 (asynchronous followers) gives back most of the write cost.** Throughput in A
-   went from about 1,545 to 1,728 ops/s, within 4% of M2, and update p99 from 39 to 35 ms:
-   the leader answers after its own fsync. The price is durability: a write acked with
-   W = 1 is on one disk until a follower pulls it, and R = 3 makes every read wait for all
-   three replicas (any replica down fails reads).
-4. **The earlier open question is mostly answered.** Session 1 had W = 1 reads (R = 3,
-   5.9 ms) faster at p99 than W = 2 reads (R = 2, 10.3 ms). Against session 2's control
-   (6.6 ms) the gap is 0.6 ms, no longer a puzzle: most of it was the difference between
-   deployments. The rest fits a replica's store holding its lock while it flushes, so
-   reads queue behind log writes that take longer with W = 2; not verified (a profile of
-   one replica under load, M5).
-5. **One follower of each shard down costs almost nothing.** Throughput −0.8%, read p99
-   +3%, update p99 unchanged against the control of the same session, and no 503 or 504.
-   Each write still needs exactly one follower, and the remaining one is always it; each
-   read pairs the two live replicas instead of rotating over three. The leader no longer
-   gets "the faster of two followers", but with both in other AZs the two were alike.
-   When node-c came back, its replicas pulled ~0.8 million missing records each and
-   reached the leader in about 15 s, with no errors (evidence §A18).
+**Writes: one more disk and one more round trip.** In M2 a write was done after the shard's
+own fsync. With W = 2 the leader also waits for a follower: the follower's long-poll returns
+the record (one hop to another AZ), the follower writes and fsyncs it, and its next pull
+tells the leader it has it (one hop back). Only then does the leader answer (ADR-0023).
+Workload B shows the cost per write most clearly, because its updates rarely wait for each
+other: the average update went from 4.5 to 8.2 ms, about one fsync (~2 ms in M2) plus a
+round trip between AZs. In workload A updates already queued behind each other on the
+leader in M2, so the extra time is a smaller share of the total: update p99 +20% in both
+sessions.
+
+**Reads: the slower of two replicas.** With R = 2 the coordinator asks two replicas and
+answers when both have. A read's latency is the maximum of two, and the maximum of two
+samples has a longer tail than either one, so p99 grows more than the average (workload B:
+average +26%, p99 +51%). How much depends on the deployment: the same release on the same
+settings gave a read p99 of 10.3 ms in session 1 and 6.6 ms in session 2, while throughput
+and update latency matched within 1%. So R = 2 adds between +5% and +64% to read p99 in
+workload A, and two sessions are not enough to narrow that down.
+
+**W = 1 gives back most of the write cost, and pays in durability.** The leader answers after
+its own fsync: throughput 1,728 ops/s (within 4% of M2) and update p99 35.3 ms instead of 39.
+A write acknowledged this way is on one disk until a follower pulls it, and R = 3 means every
+read waits for all three replicas and fails if any one is down.
+
+**Why W = 1 reads looked faster.** In session 1, W = 1 reads (R = 3) had a p99 of 5.9 ms
+against 10.3 ms with W = 2 (R = 2), although they wait for three replicas instead of two.
+Against session 2's control (6.6 ms) the gap is 0.6 ms, so most of it was the difference
+between deployments. The rest fits the store holding its lock while it fsyncs: reads on a
+replica wait behind its log writes, and with W = 2 those take longer. Not verified; a
+profile of one replica under load would settle it (M5).
+
+**One follower per shard down costs almost nothing.** Against the control of the same
+session: throughput −0.8%, read p99 +3%, update p99 unchanged, no 503 or 504. Each write
+still needs exactly one follower, and now it is always the remaining one; each read pairs
+the two live replicas instead of rotating over three. When node-c came back, its replicas
+pulled about 0.8 million missing records each and caught up with the leaders in about 15 s,
+without errors (evidence §A18).
 
 ## CPU credits
 
@@ -116,4 +118,4 @@ Each node runs two replicas (one of each shard, ADR-0020), so a leader shares it
 with a follower of the other shard. Shard 1's leader is on node a and shard 2's on node b,
 so the two leaders don't compete for one machine. Neighbours outside our control (other
 tenants of the same host) are the likely cause of the read-tail difference between the
-sessions (point 2).
+sessions (see "Reads" above).
