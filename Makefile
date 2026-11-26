@@ -138,6 +138,7 @@ smoke:           ## the four operations against a running coordinator (BASE=http
 # --- M2: releases and the app in AWS (ADR-0009, ADR-0014) --------------------------------
 
 BUCKET = $(shell $(CFN) list-exports --query "Exports[?Name=='$(ARTIFACTS_STACK)-BucketName'].Value" --output text)
+comma := ,
 CLIENT_CIDR ?= $(shell curl -s https://checkip.amazonaws.com)/32
 
 up-artifacts:    ## create/update the S3 artifacts stack (once; it stays)
@@ -178,7 +179,7 @@ up-app:          ## deploy the app stack running VERSION (BENCH=true adds the cl
 	else image="ParameterKey=ImageId,ParameterValue=$$($(AWS) ssm get-parameter --name $(AMI_PARAMETER) --query Parameter.Value --output text)"; fi; \
 	echo "AMI: $$image"; \
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) ParameterKey=AllowedClientCidr,ParameterValue=$(CLIENT_CIDR) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) $(if $(strip $(CLIENT_CIDR)),ParameterKey=AllowedClientCidr$(comma)ParameterValue=$(strip $(CLIENT_CIDR))) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
@@ -216,6 +217,8 @@ smoke-aws:       ## smoke test on the coordinator via SSM: every node must run V
 # evidence 63), so the summaries come back in the SSM output; this target saves them to
 # bench-results/<sha>/<time>.txt and uploads that file to S3 with its own credentials.
 RUNS ?= 3
+WORKLOADS ?= a b # M3 variants: WORKLOADS=a LABEL=w1 (or LABEL=follower-down)
+LABEL ?=
 
 bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=true)
 	@set -euo pipefail; \
@@ -232,15 +235,15 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	  sleep 10; done; \
 	cmd=$$($(AWS) ssm send-command --instance-ids $$client --document-name AWS-RunShellScript \
 	  --comment "capstone-kv benchmark $(VERSION)" --timeout-seconds 600 \
-	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS)\"]" \
+	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS) '$(strip $(WORKLOADS))'\"]" \
 	  --query Command.CommandId --output text); \
 	echo "SSM command $$cmd started $$(date -u +%T) UTC; polling every 30 s"; \
 	while :; do \
 	  status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null || echo Pending); \
 	  case $$status in Pending|InProgress|Delayed) sleep 30;; *) break;; esac; \
 	done; \
-	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ).txt; mkdir -p bench-results/$(VERSION); \
-	{ echo "release $(VERSION), client $$client -> $$url, runs per workload: $(RUNS), SSM status: $$status"; \
+	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ)$(if $(LABEL),-$(LABEL)).txt; mkdir -p bench-results/$(VERSION); \
+	{ echo "release $(VERSION), client $$client -> $$url, workloads: $(strip $(WORKLOADS)), runs per workload: $(RUNS), label: $(or $(LABEL),-), SSM status: $$status"; \
 	  $(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query StandardOutputContent --output text; } > $$result; \
 	cat $$result; \
 	$(AWS) s3 cp $$result s3://$(BUCKET)/$$result --quiet; \

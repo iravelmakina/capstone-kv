@@ -12,8 +12,11 @@ Parameters:
     AllowedPattern: ^[0-9a-f]{7,40}$
   AllowedClientCidr:
     Type: String
-    Description: Extra address range allowed to call the coordinator (e.g. my IP as x.x.x.x/32).
-    AllowedPattern: ^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$
+    Description: >-
+      Extra address range allowed to call the coordinator (e.g. my IP as x.x.x.x/32), or
+      empty for none. Must not be the VPC's own range: that rule exists already.
+    Default: ""
+    AllowedPattern: ^$|^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$
   NetworkStack:
     Type: String
     Default: velmakina-kv-network
@@ -54,29 +57,46 @@ Parameters:
 
 Conditions:
   WithBenchmarkClient: !Equals [!Ref BenchmarkClient, "true"]
+  WithClientCidr: !Not [!Equals [!Ref AllowedClientCidr, ""]]
 
 Resources:
   # --- Security groups ------------------------------------------------------------------
+  # The coordinator's two rules are separate resources, not a list inside the group: when
+  # the client range equalled the VPC's, EC2 kept the two list entries as one rule, and a
+  # later deploy with another client range removed it, VPC rule included (M3 evidence §A9).
+  # As separate resources each deploy changes only its own rule, and a client range equal
+  # to the VPC's fails loudly (duplicate rule) instead of silently.
   CoordinatorSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: capstone-kv coordinator - API from inside the VPC and the allowed client range
       VpcId: !ImportValue
         Fn::Sub: ${NetworkStack}-VpcId
-      SecurityGroupIngress:
-        - Description: API from inside the VPC (benchmark client)
-          IpProtocol: tcp
-          FromPort: 8080
-          ToPort: 8080
-          CidrIp: !ImportValue
-            Fn::Sub: ${NetworkStack}-VpcCidr
-        - Description: API from the allowed client range (my laptop)
-          IpProtocol: tcp
-          FromPort: 8080
-          ToPort: 8080
-          CidrIp: !Ref AllowedClientCidr
       Tags:
         - { Key: Name, Value: velmakina-kv-coordinator-sg }
+
+  # Replica heartbeats, the benchmark client and the smoke test (SSM, on the coordinator).
+  CoordinatorFromVpc:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref CoordinatorSecurityGroup
+      Description: API from inside the VPC (replicas, benchmark client)
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: !ImportValue
+        Fn::Sub: ${NetworkStack}-VpcCidr
+
+  CoordinatorFromClient:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: WithClientCidr
+    Properties:
+      GroupId: !Ref CoordinatorSecurityGroup
+      Description: API from the allowed client range (my laptop)
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: !Ref AllowedClientCidr
 
   # Replicas accept traffic only from the coordinator's group (reads, writes, promotion
   # checks) and from each other (followers pull the leader's log): no address ranges, so

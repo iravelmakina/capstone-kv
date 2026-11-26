@@ -1,17 +1,17 @@
 #!/bin/bash
 # Benchmark run on the client instance (ADR-0016), started through SSM by `make bench-aws`:
 #
-#   bench.sh <bucket> <bench-version> <coordinator-url> [runs]
+#   bench.sh <bucket> <bench-version> <coordinator-url> [runs] [workloads]
 #
 # Downloads kvbench and the workload files from s3://<bucket>/bench/<bench-version>/, loads
-# the records once, runs workloads A and B <runs> times each (default 3), and prints each
-# run's final summary. The instance role can read S3 but not write it (M1 evidence 63), so
+# the records once, runs each workload (default "a b") <runs> times (default 3), and prints
+# each run's final summary. M3's variants (W = 1, a follower down) run only "a". The instance role can read S3 but not write it (M1 evidence 63), so
 # results leave through the SSM command output; `make bench-aws` saves them locally and
 # uploads them to S3 with its own credentials. Kept short: SSM returns at most 24,000
 # characters, so go-ycsb's progress lines (every 10 s) stay on the instance.
 set -uo pipefail
 
-BUCKET=$1 VERSION=$2 URL=$3 RUNS=${4:-3}
+BUCKET=$1 VERSION=$2 URL=$3 RUNS=${4:-3} WORKLOADS=${5:-a b}
 REGION=us-east-1
 WORK=/opt/kvbench
 
@@ -41,7 +41,7 @@ step() {
 echo "== load ($(date -u +%T))"
 step load.txt load "${COMMON[@]}" -P workloads/workloada
 
-for w in a b; do
+for w in $WORKLOADS; do
   for i in $(seq "$RUNS"); do
     echo "== workload $w, run $i ($(date -u +%T))"
     step "workload$w-run$i.txt" run "${COMMON[@]}" -P "workloads/workload$w"
