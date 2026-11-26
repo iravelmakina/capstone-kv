@@ -52,7 +52,6 @@
 
 - [ ] 7.1 Smoke test also checks that a put is readable with one follower stopped
 - [ ] 7.2 A deploy from `main` goes green with the M3 stack
-- [ ] 7.3 `.github/workflows/docs.yml` (ADR-0024): on changes under `docs/`, `openspec/` or `*.md`, runs `openspec validate --all --strict` and a relative-link check, without AWS; a comment in `ci-cd.yml` and `docs.yml` links the two path lists; a docs-only push goes green outside a lab session
 
 ## 8. Benchmark
 

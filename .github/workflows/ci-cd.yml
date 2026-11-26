@@ -10,7 +10,6 @@ name: ci-cd
 # A push or PR whose changed files are ALL documentation runs nothing (ADR-0019): no build,
 # no deploy, so docs can land on main without a lab session. One changed file outside these
 # paths runs the whole pipeline. Manual runs (rollback) are never filtered.
-# The same list triggers docs.yml (ADR-0024), the check docs-only commits get: keep both in step.
 on:
   push:
     paths-ignore:
