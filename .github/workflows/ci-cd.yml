@@ -144,3 +144,7 @@ jobs:
       # so a deploy that changed nothing can't pass by reporting the old version.
       - name: every node runs the release; create table, put, read, exists, delete
         run: make smoke-aws ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION}
+      # M3 task 7.1: stops a node that runs no leader (one follower of each shard), checks
+      # that puts commit and read back, starts it and waits until it has caught up.
+      - name: one follower per shard down; puts still commit and read back
+        run: make smoke-replica ${ROLLBACK_VERSION:+VERSION=$ROLLBACK_VERSION}
