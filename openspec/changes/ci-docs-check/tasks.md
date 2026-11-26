@@ -6,7 +6,7 @@
 
 ## 2. Workflow
 
-- [ ] 2.1 `.github/workflows/docs.yml` (ADR-0024) and a comment in `ci-cd.yml` linking the two path lists; tested locally, including a broken link
+- [x] 2.1 `.github/workflows/docs.yml` (ADR-0024) and a comment in `ci-cd.yml` linking the two path lists; tested locally, including a broken link
 - [ ] 2.2 A docs-only push runs `docs` green and starts no `ci-cd` run; a PR to `main`
 
 ## 3. Close
