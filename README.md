@@ -97,7 +97,8 @@ curl -H "Authorization: Bearer $KEY" localhost:8080/v1/tables
 Monitoring (same configuration as in AWS): Grafana http://localhost:3000 (dashboard
 "capstone-kv"), Prometheus http://localhost:9090, Alertmanager http://localhost:9093. Alerts go
 to Telegram when `secrets/telegram/telegram_token` and `telegram_chat_id` exist (a bot from
-@BotFather), otherwise only to the UIs. `make monitoring-check` runs the alert rules' tests.
+@BotFather), otherwise only to the UIs. `make monitoring-check` runs the alert rules' tests;
+`make grafana-check` checks Grafana's data sources and dashboard.
 
 MCP server, for Claude Code (or any MCP client) against the local cluster:
 
@@ -165,7 +166,8 @@ password from `secrets/` into Secrets Manager; the coordinator won't start witho
 `make monitoring-images` (the Alloy image for the private nodes). Then
 `make up-app MONITORING=true` adds the monitor; `make grafana` opens its Grafana on
 http://localhost:3000 through SSM port forwarding (needs the AWS CLI's Session Manager
-plugin). `make rotate-keys` reloads changed keys without a restart.
+plugin), and `make grafana-check` in another terminal checks it. `make rotate-keys` reloads
+changed keys without a restart.
 
 Rollback: run the **ci-cd** workflow by hand with an earlier release SHA, or
 `make up-app VERSION=<sha>` (then `make smoke-aws VERSION=<sha>`).

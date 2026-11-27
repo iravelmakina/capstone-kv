@@ -316,6 +316,12 @@ prometheus:      ## Prometheus of the AWS monitor on http://localhost:9090 (SSM 
 	@id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='MonitorInstanceId'].OutputValue" --output text); \
 	$(AWS) ssm start-session --target $$id --document-name AWS-StartPortForwardingSession --parameters portNumber=9090,localPortNumber=9090
 
+# grafana-check: Grafana's data sources, each checked the way its plugin supports (the
+# Alertmanager one has no server-side health check), and the dashboard's panels. Locally
+# after `make local-up`; in AWS while `make grafana` runs in another terminal.
+grafana-check:   ## check Grafana's data sources and dashboard on http://localhost:3000
+	python3 scripts/grafana-check.py http://localhost:3000 secrets/grafana_password
+
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,
 # runs bench.sh on the client through SSM and waits (polling: a full run takes ~40 min,
