@@ -69,6 +69,29 @@ func TestSLOBoundsAreBucketEdges(t *testing.T) {
 	}
 }
 
+// ADR-0031: below the write SLO, edges are close enough for p99 to be near the client's:
+// at most 2 ms apart up to 10 ms, 5 ms up to 20 ms, 10 ms up to 60 ms.
+func TestBucketsFineBelowTheSLO(t *testing.T) {
+	const eps = 1e-9
+	for i := 1; i < len(LatencyBuckets); i++ {
+		lo, hi := LatencyBuckets[i-1], LatencyBuckets[i]
+		limit := 0.0
+		switch {
+		case hi <= 0.01+eps:
+			limit = 0.002
+		case hi <= 0.02+eps:
+			limit = 0.005
+		case hi <= 0.06+eps:
+			limit = 0.01
+		default:
+			continue
+		}
+		if hi-lo > limit+eps {
+			t.Errorf("buckets %g and %g are %g s apart, more than %g (ADR-0031)", lo, hi, hi-lo, limit)
+		}
+	}
+}
+
 func TestLabelValuesEscaped(t *testing.T) {
 	r := New()
 	r.Counter("x_total", "X.", "v").With("a\"b\\c\nd").Inc()

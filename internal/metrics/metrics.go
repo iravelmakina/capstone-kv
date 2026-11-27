@@ -17,8 +17,11 @@ import (
 )
 
 // LatencyBuckets are the histogram bounds in seconds. They include both SLO thresholds,
-// 15 ms and 60 ms (ADR-0026), so SLO checks don't interpolate inside a bucket.
-var LatencyBuckets = []float64{0.001, 0.002, 0.004, 0.008, 0.015, 0.03, 0.06, 0.12, 0.25, 0.5, 1, 2, 5}
+// 15 ms and 60 ms (ADR-0026), so SLO checks don't interpolate inside a bucket, and are at
+// most 2 ms apart up to 10 ms, 5 ms up to 20 ms and 10 ms up to 60 ms, so a p99 below the
+// SLO is close to the client's (ADR-0031: with nothing between 30 and 60 ms, a 38.5 ms
+// write p99 showed as 55 ms).
+var LatencyBuckets = []float64{0.001, 0.002, 0.004, 0.006, 0.008, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06, 0.12, 0.25, 0.5, 1, 2, 5}
 
 // Registry holds every metric family of one process, in registration order, and labels
 // that every series of the process carries (e.g. shard and replica).
