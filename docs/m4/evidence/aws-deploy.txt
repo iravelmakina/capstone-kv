@@ -84,7 +84,10 @@ $ make prometheus; make grafana      (SSM port forwarding to 9090 and 3000)
 - Loki: streams from 7 containers (kv-coordinator, kv-1a..kv-2c) on 4 hosts.
 - Grafana: dashboard capstone-kv with 17 panels; Prometheus and Loki data sources pass
   their health check. The Alertmanager data source fails Grafana's health check ("Plugin
-  unavailable", HTTP 500) but its queries work through the proxy; not fixed.
+  unavailable", HTTP 500) but its queries work through the proxy. Checked locally later
+  (Grafana 11.4.0, docker compose): the same 500 on /api/datasources/uid/alertmanager/health,
+  while the proxy (/api/v2/status) and Grafana's Alertmanager API both answer 200. Grafana's
+  Alertmanager data source has no server-side health check, so this is Grafana, not a fault.
 - Right after start, ErrorBudgetFastBurn and ErrorBudgetSpent fired: 4 probe 503s
   while the cluster formed, at almost no traffic, are a large share of an hour. See the
   note at the end.
@@ -374,12 +377,19 @@ done 21:05:01 UTC
 $ make down-app      (run by the author, 21:09:51 UTC)
 DELETE_COMPLETE      (21:12:32 UTC; only velmakina-kv-network and velmakina-kv-artifacts left)
 
-===== Open after the lab =====
-- D2 against ADR-0026 (above): one node held both leaders, and the closed-loop client
-  turned 14.7 s of 503 into ≈ 0.93% of an hour's requests. ADR-0030 (proposed) supersedes
-  ADR-0026's availability value; the author decides. D1' shows the other side of it: a
-  stopped follower node costs nothing.
-- The burn-rate alerts fire on a handful of errors at almost no traffic (S5): a
-  minimum-traffic guard is a design change (ADR-0029), for the author to decide.
-- Prometheus and Loki lose their data on a lab restart (R1).
-- smoke-replica can't pass under write load (D1'); fine for its purpose, worth a comment.
+===== What the lab found, and where it went =====
+- D2 against ADR-0026: one node held both leaders, and the closed-loop client turned
+  14.7 s of 503 into ≈ 0.93% of an hour's requests. -> ADR-0030 (accepted): availability
+  99% per hour. D1' shows the other side of it: a stopped follower node costs nothing.
+- The burn-rate alerts fired on a handful of errors at almost no traffic (S5). -> ADR-0030:
+  budget alerts only at >= 1 request/s; rules_test.yml covers it.
+- Prometheus and Loki lost their data on a lab restart (R1): Prometheus got a new
+  anonymous volume per container, Loki kept its data inside the container. -> monitor-boot.sh
+  puts both on the instance's disk. Checked locally (containers removed and started again,
+  old samples and log lines still there); not yet in AWS.
+- smoke-replica couldn't pass under write load (D1'). -> its target is now each leader's
+  last record 6 s after the node is back. Checked locally under ~390 writes/s: the old
+  check failed after 123 s, the new one passed in 6 s; idle it passes as before. Not yet
+  in AWS.
+- Two leaders on one node: left for M5 (ADR-0030's runner-up).
+- Write p99 between 30 and 60 ms is interpolated (no bucket in between, ADR-0025).
