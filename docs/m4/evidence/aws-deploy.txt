@@ -377,6 +377,86 @@ done 21:05:01 UTC
 $ make down-app      (run by the author, 21:09:51 UTC)
 DELETE_COMPLETE      (21:12:32 UTC; only velmakina-kv-network and velmakina-kv-artifacts left)
 
+#############################################################################################
+Lab session 3, 2026-11-27 evening: the fixes made after sessions 1 and 2, checked in AWS.
+Release e424831e83b6 (all of them, ADR-0030 and ADR-0031 included). The author ran
+`make release`, `CONFIRM=yes make up-app MONITORING=true BENCH=true`, then
+`bash scripts/m4-lab-check.sh` (written for this; raw output in
+bench-results/e424831e83b6/20261127T220243Z-m4-lab-check.txt), then `make down-app`.
+
+===== [V] scripts/m4-lab-check.sh, summary (22:02-22:36 UTC) =====
+   PASS smoke-aws                  (all 7 versions e424831e83b6)
+   PASS grafana-check              (Alertmanager through the proxy; Prometheus 9/9; 17/17 panels)
+   PASS ADR-0030 thresholds and traffic guard loaded
+        ErrorBudgetFastBurn | kv:errors:ratio_rate5m > 0.1 and kv:errors:ratio_rate1m > 0.1 and on () sum(rate(kv_requests_total[5m])) >= 1
+        ErrorBudgetSpent | kv:errors:ratio_rate1h > 0.01 and on () sum(rate(kv_requests_total[5m])) >= 1
+   PASS ADR-0031 buckets exported
+        0.001 0.002 0.004 0.006 0.008 0.01 0.015 0.02 0.03 0.04 0.05 0.06 0.12 0.25 0.5 1.0 2.0 5.0 +Inf
+   PASS smoke-replica under load
+   INFO p99 compared
+   PASS Prometheus kept its data
+   PASS Loki kept its logs
+   PASS grafana-check after the restart
+# Node A registered a minute or two late again (smoke and grafana-check saw two nodes'
+# replicas; Prometheus soon had all 9 targets, Loki all 7 containers), and again shard-1's
+# first leader was 1b, so both leaders started on node B (10.20.86.104), as in session 1.
+# Twice in M4 now (M3's first deploy had 1a and 2b): whichever node registers first gets
+# a leader, so a late node A leaves both on B. A start-up effect, not chance (M5).
+
+===== [D''] a follower node stopped under workload A, with the new smoke-replica =====
+   run phase: 909 req/s
+   stop-instances at 22:08:35, node 10.20.111.14 (1c, 2c)
+   ReplicaDown firing after: 17 s
+   NodeDown firing after:    18 s
+     ok   every replica on 10.20.111.14 reported down
+     ok   10 puts committed and read back, then deleted, with 10.20.111.14 down
+     starting i-067ec1bbf1b4c614a
+     ok   every replica on 10.20.111.14 back and at or past its leader's last record (shard-1=1:97486 shard-2=1:98484)
+     smoke-replica passed
+   5xx over the drill (85 s): 0
+   read p99 by shard: 11.4 / 10.6 ms; write p99 by shard: 39.1 / 39.8 ms
+# In session 2 the old check failed here after 120 s (D1'); now it passes under the same
+# kind of load. Again no 5xx while a follower node is down.
+
+===== [P] one clean run of workload A: p99 from Prometheus against go-ycsb (ADR-0031) =====
+   run 22:22:45-22:34:27; client: READ p99 13.7 ms (avg 3.7), UPDATE p99 42.9 ms (avg 18.7), 1,424 ops/s
+   read p99:  Prometheus 9.3 ms, client 13.7 ms
+   write p99: Prometheus 41.0 ms, client 42.9 ms
+   write buckets over the run: le 0.03 464,450 | 0.04 495,100 | 0.05 498,222 | 0.06 499,140 | +Inf 500,417
+# Writes: 2 ms apart now; in session 2, before ADR-0031, 55 ms against 38.5 ms. The p99
+# falls in the new 40-50 ms bucket. Reads: the coordinator's 9.3 ms sits in a 2 ms bucket,
+# so the 4.4 ms gap to the client is not the histogram: it is the network from the client
+# to the coordinator and the client itself, which the coordinator can't see. The client's
+# read p99 (13.7 ms) is higher than in session 2 (9.6 ms) and close to the 15 ms SLO: the
+# deployment-to-deployment spread already seen in M3 (6.6-10.3 ms). One run, not three.
+
+===== [M] the monitor stopped and started: data kept (fix in monitor-boot.sh) =====
+   before: Prometheus oldest sample 22:03:08 UTC; Loki lines in the 30 min before: >= 5000
+   monitor stopped at 22:35:13, running at 22:35:31
+   after:  Prometheus oldest sample 22:03:08 UTC; Loki lines in the same 30 min: >= 5000
+# The script's Loki count stops at its query limit (5000), so it shows the old lines are
+# there, not that every one is. Checked on the monitor through SSM right after (22:36:51),
+# because Docker's restart policy brings the old containers back at boot before
+# monitor-boot.sh recreates them, and a check that early could have seen those:
+#   monitor-boot: running grafana loki blackbox alertmanager prometheus   (cloud-init log)
+#   /prometheus created 2026-11-27T22:35:38Z ... /opt/kvmon/data/prometheus->/prometheus
+#   /loki created 2026-11-27T22:35:39Z ... /opt/kvmon/data/loki->/loki
+#   prometheus oldest sample 22:03:08; loki lines in the 25 min before: 970,133
+# Recreated by the boot script 7 s after the start, on the new directories, with the data
+# from 22:03 in them. In session 2 the same restart left Prometheus starting at 18:18:39.
+
+===== [Disk] what keeping the data costs =====
+   /opt/kvmon/data: Prometheus 4.4 MB, Loki 420 MB after ~35 minutes (two benchmark runs)
+   monitor root volume: 8.0 GB, 3.4 GB used, 4.7 GB free
+# Under benchmark load (~900 requests/s, a JSON line per request on coordinator and
+# replicas) Loki grows ≈ 0.8 GB an hour: 4.7 GB lasts ≈ 5-6 hours of steady load. Enough
+# for an M4 session; not for M5's longer load tests. ADR-0029 rated "Loki or Prometheus
+# fill the disk" Low; with these numbers it is Medium for M5 (a bigger monitor volume or
+# fewer request lines at info level). Not changed in M4.
+
+$ make down-app   (run by the author)
+velmakina-kv-app deleted      (only velmakina-kv-network and velmakina-kv-artifacts left)
+
 ===== What the lab found, and where it went =====
 - D2 against ADR-0026: one node held both leaders, and the closed-loop client turned
   14.7 s of 503 into ≈ 0.93% of an hour's requests. -> ADR-0030 (accepted): availability
@@ -385,11 +465,15 @@ DELETE_COMPLETE      (21:12:32 UTC; only velmakina-kv-network and velmakina-kv-a
   budget alerts only at >= 1 request/s; rules_test.yml covers it.
 - Prometheus and Loki lost their data on a lab restart (R1): Prometheus got a new
   anonymous volume per container, Loki kept its data inside the container. -> monitor-boot.sh
-  puts both on the instance's disk. Checked locally (containers removed and started again,
-  old samples and log lines still there); not yet in AWS.
+  puts both on the instance's disk. Checked locally, then in AWS (session 3, [M]).
 - smoke-replica couldn't pass under write load (D1'). -> its target is now each leader's
-  last record 6 s after the node is back. Checked locally under ~390 writes/s: the old
-  check failed after 123 s, the new one passed in 6 s; idle it passes as before. Not yet
-  in AWS.
+  last record 6 s after the node is back. Checked locally under ~390 writes/s (old: FAIL
+  after 123 s, new: ok in 6 s), then in AWS under ~900 requests/s (session 3, [D'']).
 - Two leaders on one node: left for M5 (ADR-0030's runner-up).
-- Write p99 between 30 and 60 ms is interpolated (no bucket in between, ADR-0025).
+- Write p99 between 30 and 60 ms was interpolated (no bucket in between, ADR-0025). ->
+  ADR-0031: buckets at 40 and 50 ms (and 6, 10, 20); in AWS write p99 41.0 ms against the
+  client's 42.9 ms (session 3, [P]).
+- Grafana's Alertmanager health check (500): Grafana's plugin has no server-side check.
+  -> `make grafana-check` checks it through the proxy; PASS in AWS (session 3, [V]).
+- Loki grows ≈ 0.8 GB an hour under benchmark load on an 8 GB monitor disk: a risk for
+  M5's longer load tests (session 3, [Disk]).
