@@ -38,9 +38,9 @@
 
 ## 5. MCP server
 
-- [ ] 5.1 `cmd/kvmcp` on the official MCP Go SDK, stdio: `list_tables`, `read_item`, `item_exists`, `create_item` (create only), `update_item` (`If-Match`), `delete_item`, with input schemas
-- [ ] 5.2 Annotations (read-only, destructive); outcomes named (created, updated, deleted, superseded, conflict, not found, not permitted, invalid, unavailable, outcome unknown); values as data, at most 16 KB
-- [ ] 5.3 Tests against a test coordinator: each tool, each outcome, a missing scope, a truncated value
+- [x] 5.1 `cmd/kvmcp` on the official MCP Go SDK, stdio: `list_tables`, `read_item`, `item_exists`, `create_item` (create only), `update_item` (`If-Match`), `delete_item`, with input schemas
+- [x] 5.2 Annotations (read-only, destructive); outcomes named (created, updated, deleted, superseded, conflict, not found, not permitted, invalid, unavailable, outcome unknown); values as data, at most 16 KB
+- [x] 5.3 Tests against a test coordinator: each tool, each outcome, a missing scope, a truncated value
 - [ ] 5.4 Verified with Claude Code as the MCP client (local cluster), by the author; transcript in `docs/m4/evidence/mcp-demo.md`
 
 ## 6. Local monitoring

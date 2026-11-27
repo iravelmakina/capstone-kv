@@ -63,6 +63,9 @@ jobs:
       - name: benchmark client builds (bench/ is its own Go module)
         working-directory: bench
         run: go vet ./... && go build ./...
+      - name: MCP server tests (cmd/kvmcp is its own Go module, ADR-0027)
+        working-directory: cmd/kvmcp
+        run: go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
