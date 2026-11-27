@@ -322,6 +322,58 @@ $ aws cloudformation list-stacks (velmakina-*, not deleted)
 velmakina-kv-artifacts	UPDATE_COMPLETE
 velmakina-kv-network	CREATE_COMPLETE
 
+#############################################################################################
+Session 2, later: key rotation (task 4.3). A fresh app stack, the same release, no monitor
+or client. The author ran these in the author's terminal; Claude Code's auto-mode checker refused
+the deploy and the delete when Claude Code tried them, although the author had approved.
+
+$ CONFIRM=yes make up-app VERSION=d8f41f62a6bc      (20:3x UTC)
+AMI: ParameterKey=ImageId,ParameterValue=ami-000d209a4fc9822c4
+change set: coordinator, 3 nodes, 2 security groups, 3 ingress rules
+CREATE_COMPLETE
+# A newer AMI than session 1's (ami-0aacbf72109c53c0c). `make up-app` takes IMAGE_ID if
+# given, else the stack's previous value on an update, else (a new stack) the SSM
+# parameter's current AMI.
+# An earlier try sat at REVIEW_IN_PROGRESS: its "yes" never reached the prompt, and the
+# check script started without a coordinator and was stopped before it changed anything
+# (it now refuses to run unless the stack is CREATE_COMPLETE).
+
+===== [K] rotating the API keys without a restart (task 4.3) =====
+Script: new keys locally (values never shown), `make secrets`, `make rotate-keys`. The
+checks run on the coordinator through SSM; the old ops key is read there from Secrets
+Manager's AWSPREVIOUS version, so no key value leaves AWS or the laptop's secrets/.
+GET /v1/tables/rotation-check (no such table): 404 = key accepted, 401 = refused.
+M4 task 4.3: key rotation in AWS, release d8f41f62a6bc, 2026-11-27 21:04 UTC
+== before
+   coordinator container started at: 2026-11-27T20:36:22.146075244Z
+   ops key (current) -> 404
+   smoke test passed against http://localhost:8080
+   SSM status: Success
+== new keys (values not shown), secrets updated, coordinator's file refreshed
+   made keys ops, probe, mcp, mcp-delete in secrets/ (values not shown)
+   updated velmakina-kv/api-keys
+   updated velmakina-kv/ops-key
+   updated velmakina-kv/probe-key
+   updated velmakina-kv/monitoring
+   keys file refreshed on <coordinator>
+== after (12 s)
+   old ops key (AWSPREVIOUS) -> 401   (want 401: refused)
+   new ops key (AWSCURRENT)  -> 404   (want 404: accepted, no such table)
+   coordinator container started at: 2026-11-27T20:36:22.146075244Z   (want: unchanged, no restart)
+   ok   CREATE (200)
+   ok   READ (200)
+   ok   DELETE (204)
+   smoke test passed against http://localhost:8080
+   SSM status: Success
+done 21:05:01 UTC
+# Within 12 s of `make rotate-keys` the coordinator refused the old key and took the new
+# one, with the same container start time: reloaded, not restarted (ADR-0027). The smoke
+# test (which reads the ops key from Secrets Manager) passed before and after.
+# velmakina-kv/monitoring was rewritten with the same values (make secrets writes all
+# four). The local keys in secrets/ are the new ones now.
+$ make down-app      (run by the author, 21:09:51 UTC)
+DELETE_COMPLETE      (21:12:32 UTC; only velmakina-kv-network and velmakina-kv-artifacts left)
+
 ===== Open after the lab =====
 - D2 against ADR-0026 (above): one node held both leaders, and the closed-loop client
   turned 14.7 s of 503 into ≈ 0.93% of an hour's requests. ADR-0030 (proposed) supersedes
