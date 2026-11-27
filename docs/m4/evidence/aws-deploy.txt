@@ -152,9 +152,9 @@ before: shard-1 leader 1b, shard-2 leader 2b (epoch 1); replicas up: 6; firing: 
 #   1.01 s, not the 3 s client timeout ADR-0026 feared. Write p99 58-59 ms, under 60 ms.
 # - Against ADR-0026: it assumed one leader change costs ~20 s of 503 on one shard's
 #   writes, ≈ 0.14% of an hour's requests. Here one node held both leaders and the
-#   closed-loop client multiplied the failures: ~50k 5xx in about 1.05 M requests (≈ 4.8%)
-#   spent the hour's budget at once. Whether to supersede ADR-0026 (or ADR-0020's leader
-#   placement) is the author's decision; not done here.
+#   closed-loop client multiplied the failures: 50,322 5xx in the run's 1.1 M requests
+#   (100 k inserts + 1 M operations; 4.6%), ≈ 0.93% of an hour at workload A's ~1,500
+#   requests/s: the hour's budget spent at once. Proposed answer: ADR-0030.
 
 ===== [D3] the coordinator container stopped (15:15:06) =====
    docker stop at 15:15:10
@@ -321,9 +321,9 @@ velmakina-kv-network	CREATE_COMPLETE
 
 ===== Open after the lab =====
 - D2 against ADR-0026 (above): one node held both leaders, and the closed-loop client
-  turned 14.7 s of 503 into ~4.8% of the hour's requests. Whether to supersede ADR-0026
-  (or ADR-0020's leader placement) is the author's decision. D1' shows the other side of
-  it: a stopped follower node costs nothing.
+  turned 14.7 s of 503 into ≈ 0.93% of an hour's requests. ADR-0030 (proposed) supersedes
+  ADR-0026's availability value; the author decides. D1' shows the other side of it: a
+  stopped follower node costs nothing.
 - The burn-rate alerts fire on a handful of errors at almost no traffic (S5): a
   minimum-traffic guard is a design change (ADR-0029), for the author to decide.
 - Prometheus and Loki lose their data on a lab restart (R1).
