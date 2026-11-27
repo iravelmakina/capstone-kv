@@ -19,13 +19,21 @@
 
 ## 2. State an SLO for your store. Where did the numbers come from?
 
-- Availability ≥ 99.5% per hour of operation; read p99 ≤ 15 ms and write p99 ≤ 60 ms per
-  shard over 5 minutes (ADR-0026).
-- **From measurements:** read p99 was 6.6–10.3 ms in M3 (two deployments of the same
-  release), so 15 ms is ≈ 1.5× the worst; write p99 was 39 ms, so 60 ms is ≈ 1.5×.
-- **99.5%, not 99.9%:** a leader change costs ≈ 20 s of 503 on one shard's writes,
-  ≈ 0.14% of an hour's requests in workload A. 99.9% would break on one planned failover;
-  99.5% fits about three, and breaks if a shard is fully down for more than ≈ 36 s.
+- Availability ≥ 99% per hour of operation (ADR-0030, which superseded ADR-0026's 99.5%);
+  read p99 ≤ 15 ms and write p99 ≤ 60 ms per shard over 5 minutes (ADR-0026).
+- **Latency from measurements:** read p99 was 6.6–10.3 ms in M3 (two deployments of the
+  same release), so 15 ms is ≈ 1.5× the worst; write p99 was 39 ms, so 60 ms is ≈ 1.5×. M4
+  in AWS with everything on: read p99 9.6 ms, write p99 38.5 ms at the client.
+- **Availability, and why it changed:** ADR-0026 chose 99.5% because one leader change
+  was expected to cost ≈ 20 s of 503 on one shard's writes, ≈ 0.14% of an hour, so about
+  three would fit. The AWS drill (D2) disproved it: the stopped node held both shards'
+  leaders, and the benchmark client, which doesn't back off, sent ~3,400 failing writes a
+  second. 50 k 5xx in 14.7 s, ≈ 0.93% of an hour, spent the whole 0.5% budget. Same
+  method, corrected numbers: 99% fits one such loss per hour and breaks on a second, or on
+  a shard fully down for more than ≈ 36 s. Placing leaders on different nodes, which
+  would allow 99.5% again, is left for M5.
+- **Budget alerts only at ≥ 1 request/s** (ADR-0030): right after a deploy, 4 failed probes
+  at almost no traffic paged as a fast burn.
 - **Per hour, not per 30 days:** the store runs only during lab sessions.
 
 ## 3. How do you detect a node failure, and how long does it take?
@@ -33,8 +41,10 @@
 - Each replica heartbeats every 5 s; the coordinator marks it down after 15 s of silence
   (ADR-0020). `kv_replica_up` goes to 0 at the next scrape (5 s); `NodeDown` (all replicas
   on one node) fires at the next rule evaluation (5 s); Alertmanager waits 5 s
-  (`group_wait`) and sends it to Telegram. Designed: ≈ 30 s plus delivery; measured in AWS:
-  see `docs/m4/evidence/aws-deploy.txt`.
+  (`group_wait`) and sends it to Telegram. **Measured in AWS** (`docs/m4/evidence/aws-deploy.txt`):
+  `ReplicaDown` and `NodeDown` firing 17–20 s after `stop-instances`, three times (D1,
+  D1', D2); a stopped leader replaced after 16 s (D2); `CoordinatorDown` after 8 s (D3).
+  Telegram gets each about 5 s later.
 - The coordinator itself can't report its own death: the probe from the monitor and the
   scrape of its metrics port catch it (`CoordinatorDown`, 10 s).
 - The monitor can't watch itself: the `Watchdog` alert reaches Telegram every hour, so an
@@ -92,5 +102,9 @@
   name, in Loki; a write is followed coordinator → leader (with its LSN) → followers (by
   LSN range). **Traces:** no spans.
 - **Missing:** per-hop timings in one view (spans), host metrics (CPU steal, disk fsync
-  time) for the noisy-neighbour question, retention beyond a session (evidence is exported
-  before teardown), and the follower's side is joined by LSN, not by request ID.
+  time) for the noisy-neighbour question, and the follower's side is joined by LSN, not by
+  request ID. Retention: metrics and logs go with the stack (evidence is exported before
+  `make down-app`). A lab restart used to empty them too; fixed, checked locally, not yet
+  in AWS.
+- **Found in the lab:** p99 between 30 and 60 ms was a guess (no bucket in between: 55 ms
+  shown for a 38.5 ms write p99). ADR-0031 added buckets at 6, 10, 20, 40 and 50 ms.
