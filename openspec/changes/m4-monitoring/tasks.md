@@ -45,14 +45,14 @@
 
 ## 6. Local monitoring
 
-- [ ] 6.1 `monitoring/`: Prometheus config and alert rules with `promtool` tests, Alertmanager config (Telegram, timings), blackbox exporter config, Grafana provisioning and the dashboard as JSON, Loki and Alloy configs
-- [ ] 6.2 `docker-compose.yml` runs the stack next to the cluster; secrets from a git-ignored file
-- [ ] 6.3 `promtool check config`, `promtool test rules`, `amtool check-config` pass
+- [x] 6.1 `monitoring/`: Prometheus config and alert rules with `promtool` tests, Alertmanager config (Telegram, timings), blackbox exporter config, Grafana provisioning and the dashboard as JSON, Loki and Alloy configs
+- [x] 6.2 `docker-compose.yml` runs the stack next to the cluster; secrets from a git-ignored file
+- [x] 6.3 `promtool check config`, `promtool test rules`, `amtool check-config` pass
 - [ ] 6.4 Local drills: a follower stopped (`NodeDown` fires and resolves), the coordinator stopped (`CoordinatorDown`), one request ID followed in Loki to the followers; output in `docs/m4/evidence/local-docker.txt`
 
 ## 7. Infrastructure
 
-- [ ] 7.1 `infra/app.yaml`: `Monitoring` parameter, monitor instance and security group (no public ingress; Loki from the VPC groups); coordinator and shard groups admit the monitor on metrics ports only; `cfn-lint` passes
+- [x] 7.1 `infra/app.yaml`: `Monitoring` parameter, monitor instance and security group (no public ingress; Loki from the VPC groups); coordinator and shard groups admit the monitor on metrics ports only; `cfn-lint` passes
 - [ ] 7.2 Alloy image delivered to private nodes through the artifacts bucket; node boot starts it
 - [ ] 7.3 Secrets `velmakina-kv/api-keys`, `velmakina-kv/ops-key` (ops and probe keys) and `velmakina-kv/monitoring` (Telegram bot, chat ID, Grafana admin password) created by the author; the pipeline passes no secret values
 
@@ -65,7 +65,7 @@
 
 ## 9. Review and docs
 
-- [ ] 9.1 `docs/m4/runbook.md`: for each alert, what it means, what to check, what to do; also what to do when the monitor itself is silent
+- [x] 9.1 `docs/m4/runbook.md`: for each alert, what it means, what to check, what to do; also what to do when the monitor itself is silent
 - [ ] 9.2 `docs/m4/control-questions.md` (author's notes)
 - [ ] 9.3 README: monitoring, keys, MCP; what changed since M3
 - [ ] 9.4 `docs/m4/cost.md`

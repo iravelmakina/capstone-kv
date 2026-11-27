@@ -1,0 +1,137 @@
+# promtool test rules monitoring/rules_test.yml (from monitoring/, see `make monitoring-check`)
+rule_files:
+  - rules.yml
+evaluation_interval: 5s
+
+tests:
+  # A node with both of its replicas down: NodeDown for that node, ReplicaDown for each.
+  - interval: 5s
+    input_series:
+      - series: 'kv_replica_up{shard="shard-1",replica="1c",node="10.0.0.3"}'
+        values: "1 0 0 0"
+      - series: 'kv_replica_up{shard="shard-2",replica="2c",node="10.0.0.3"}'
+        values: "1 0 0 0"
+      - series: 'kv_replica_up{shard="shard-1",replica="1a",node="10.0.0.1"}'
+        values: "1 1 1 1"
+    alert_rule_test:
+      - eval_time: 10s
+        alertname: NodeDown
+        exp_alerts:
+          - exp_labels: { severity: critical, node: "10.0.0.3" }
+            exp_annotations:
+              summary: "Node 10.0.0.3 is down"
+              description: "No replica on 10.0.0.3 has sent a heartbeat for 15 s (runbook: NodeDown)."
+      - eval_time: 10s
+        alertname: ReplicaDown
+        exp_alerts:
+          - exp_labels: { severity: warning, shard: shard-1, replica: 1c, node: "10.0.0.3" }
+            exp_annotations:
+              summary: "Replica 1c of shard-1 is down"
+              description: "No heartbeat from 1c on 10.0.0.3 for 15 s (runbook: ReplicaDown)."
+          - exp_labels: { severity: warning, shard: shard-2, replica: 2c, node: "10.0.0.3" }
+            exp_annotations:
+              summary: "Replica 2c of shard-2 is down"
+              description: "No heartbeat from 2c on 10.0.0.3 for 15 s (runbook: ReplicaDown)."
+
+  # One replica of a node down is not a node down.
+  - interval: 5s
+    input_series:
+      - series: 'kv_replica_up{shard="shard-1",replica="1c",node="10.0.0.3"}'
+        values: "0 0 0"
+      - series: 'kv_replica_up{shard="shard-2",replica="2c",node="10.0.0.3"}'
+        values: "1 1 1"
+    alert_rule_test:
+      - eval_time: 10s
+        alertname: NodeDown
+        exp_alerts: []
+
+  # The coordinator is gone: its own series vanish, the probe fails.
+  - interval: 5s
+    input_series:
+      - series: 'probe_success{job="probe",instance="http://coordinator:8080/v1/tables/probe/items/probe"}'
+        values: "1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5s
+        alertname: CoordinatorDown
+        exp_alerts: []
+      - eval_time: 20s
+        alertname: CoordinatorDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: probe, instance: "http://coordinator:8080/v1/tables/probe/items/probe" }
+            exp_annotations:
+              summary: The coordinator doesn't answer
+              description: "Probe or scrape of http://coordinator:8080/v1/tables/probe/items/probe failing: every request fails (runbook: CoordinatorDown)."
+
+  # Slow reads with traffic page after 5 minutes; the same slow reads at idle don't.
+  - interval: 15s
+    input_series:
+      # 2 reads/s, all of them between 30 and 60 ms (bucket 0.06): p99 ≈ 60 ms.
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-1",op="read",le="0.03"}'
+        values: "0+0x40"
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-1",op="read",le="0.06"}'
+        values: "0+30x40"
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-1",op="read",le="+Inf"}'
+        values: "0+30x40"
+      - series: 'kv_request_duration_seconds_count{shard="shard-1",op="read"}'
+        values: "0+30x40"
+      # shard-2: equally slow, but one read a minute.
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-2",op="read",le="0.03"}'
+        values: "0+0x40"
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-2",op="read",le="0.06"}'
+        values: "0+0.25x40"
+      - series: 'kv_request_duration_seconds_bucket{shard="shard-2",op="read",le="+Inf"}'
+        values: "0+0.25x40"
+      - series: 'kv_request_duration_seconds_count{shard="shard-2",op="read"}'
+        values: "0+0.25x40"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ReadLatencyHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, shard: shard-1, op: read }
+            exp_annotations:
+              summary: "Read p99 of shard-1 above 15 ms"
+              description: "Read p99 above the 15 ms SLO for 5 min; the value is on the dashboard (runbook: ReadLatencyHigh)."
+
+  # Lag over 10 s for 30 s.
+  - interval: 5s
+    input_series:
+      - series: 'kv_follower_lag_seconds{shard="shard-1",replica="1a",follower="1c"}'
+        values: "0 5 11 16 21 26 31 36 41"
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: ReplicationLagHigh
+        exp_alerts: []
+      - eval_time: 40s
+        alertname: ReplicationLagHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, shard: shard-1, replica: 1a, follower: 1c }
+            exp_annotations:
+              summary: "Follower 1c of shard-1 is behind"
+              description: "More than 10 s since it last held the leader's last record (runbook: ReplicationLagHigh)."
+
+  # 10% of requests fail: the fast burn pages.
+  - interval: 15s
+    input_series:
+      - series: 'kv_requests_total{op="write",code="200",shard="shard-1",principal="ops"}'
+        values: "0+90x40"
+      - series: 'kv_requests_total{op="write",code="503",shard="shard-1",principal="ops"}'
+        values: "0+10x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Error budget burning fast
+              description: "Over 5% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
+
+  # The watchdog always fires.
+  - interval: 5s
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: The monitor is alive
+              description: "An hour without this message means the monitor is down (runbook: Watchdog)."

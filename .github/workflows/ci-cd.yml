@@ -63,6 +63,8 @@ jobs:
       - name: benchmark client builds (bench/ is its own Go module)
         working-directory: bench
         run: go vet ./... && go build ./...
+      - name: alert rule tests (promtool, ADR-0029)
+        run: docker run --rm -v "$PWD/monitoring:/m" -w /m --entrypoint promtool prom/prometheus:v3.1.0 test rules rules_test.yml
       - name: MCP server tests (cmd/kvmcp is its own Go module, ADR-0027)
         working-directory: cmd/kvmcp
         run: go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...

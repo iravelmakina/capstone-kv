@@ -1,0 +1,49 @@
+// Grafana Alloy on every instance (ADR-0029; Promtail's successor): reads the JSON logs of
+// the capstone-kv containers from Docker and sends them to Loki on the monitor. The
+// request ID stays in the line (searched with `| json | request_id="..."`); only the
+// container, the host and the level become labels, so Loki's index stays small.
+// LOKI_URL comes from the environment (http://loki:3100 locally, the monitor's private IP
+// in AWS).
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "kv" {
+  targets = discovery.docker.containers.targets
+
+  // Only the store's containers: kv-* on EC2, <project>-<service>-1 in docker compose.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(kv-.*|.*-(coordinator|r[12][abc])-[0-9]+)"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "kv" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.kv.output
+  forward_to = [loki.process.kv.receiver]
+}
+
+loki.process "kv" {
+  stage.json {
+    expressions = { level = "level" }
+  }
+  stage.labels {
+    values = { level = "" }
+  }
+  forward_to = [loki.write.monitor.receiver]
+}
+
+loki.write "monitor" {
+  endpoint {
+    url = env("LOKI_URL") + "/loki/api/v1/push"
+  }
+  external_labels = { host = constants.hostname }
+}

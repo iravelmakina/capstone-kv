@@ -1,0 +1,140 @@
+# Recording rules for the SLIs and alert rules for capstone-kv (ADR-0025, ADR-0026,
+# ADR-0029). Thresholds are the SLOs: availability 99.5% per hour, read p99 15 ms and
+# write p99 60 ms per shard over 5 minutes. Tested by rules_test.yml (promtool).
+groups:
+  - name: sli
+    rules:
+      # Availability as the coordinator counts it: answers below 500 over all answers.
+      - record: kv:availability:ratio_rate5m
+        expr: |
+          1 - sum(rate(kv_requests_total{code=~"5.."}[5m]))
+            / clamp_min(sum(rate(kv_requests_total[5m])), 1e-9)
+      # p99 per shard and operation, at the coordinator.
+      - record: kv:request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (shard, op, le) (rate(kv_request_duration_seconds_bucket{op=~"read|write"}[5m])))
+      - record: kv:requests:rate5m
+        expr: sum by (shard, op) (rate(kv_request_duration_seconds_count{op=~"read|write"}[5m]))
+      # The 5xx share over the windows the burn-rate alerts use.
+      - record: kv:errors:ratio_rate1m
+        expr: sum(rate(kv_requests_total{code=~"5.."}[1m])) / clamp_min(sum(rate(kv_requests_total[1m])), 1e-9)
+      - record: kv:errors:ratio_rate5m
+        expr: sum(rate(kv_requests_total{code=~"5.."}[5m])) / clamp_min(sum(rate(kv_requests_total[5m])), 1e-9)
+      - record: kv:errors:ratio_rate1h
+        expr: sum(rate(kv_requests_total{code=~"5.."}[1h])) / clamp_min(sum(rate(kv_requests_total[1h])), 1e-9)
+
+  - name: kv
+    rules:
+      # Seen from outside: the probe fails, or the coordinator's metrics can't be scraped.
+      # Its own series vanish when it is down, so this is the alert that still fires.
+      - alert: CoordinatorDown
+        expr: probe_success{job="probe"} == 0 or up{job="coordinator"} == 0
+        for: 10s
+        labels: { severity: critical }
+        annotations:
+          summary: The coordinator doesn't answer
+          description: "Probe or scrape of {{ $labels.instance }} failing: every request fails (runbook: CoordinatorDown)."
+
+      # Every replica on a node is down: the instance (or its Docker) is gone. With
+      # ADR-0020's placement that is one replica of each shard.
+      - alert: NodeDown
+        expr: count by (node) (kv_replica_up == 0) == count by (node) (kv_replica_up)
+        labels: { severity: critical }
+        annotations:
+          summary: "Node {{ $labels.node }} is down"
+          description: "No replica on {{ $labels.node }} has sent a heartbeat for 15 s (runbook: NodeDown)."
+
+      - alert: ReplicaDown
+        expr: kv_replica_up == 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Replica {{ $labels.replica }} of {{ $labels.shard }} is down"
+          description: "No heartbeat from {{ $labels.replica }} on {{ $labels.node }} for 15 s (runbook: ReplicaDown)."
+
+      - alert: ShardWithoutLeader
+        expr: kv_shard_has_leader == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.shard }} has no live leader"
+          description: "Writes to {{ $labels.shard }} get 503 and no promotion has happened (runbook: ShardWithoutLeader)."
+
+      - alert: ScrapeFailing
+        expr: up{job="replica"} == 0
+        for: 30s
+        labels: { severity: warning }
+        annotations:
+          summary: "Can't scrape {{ $labels.instance }}"
+          description: "Prometheus can't reach a replica's metrics port (runbook: ScrapeFailing)."
+
+      # The coordinator answers but reports no replicas at all.
+      - alert: MetricsMissing
+        expr: absent(kv_replica_up) and on() (up{job="coordinator"} == 1)
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: The coordinator reports no replicas
+          description: "kv_replica_up is absent while the coordinator is up (runbook: MetricsMissing)."
+
+      # Latency SLOs per shard, only with enough traffic for a p99 to mean something.
+      - alert: ReadLatencyHigh
+        expr: |
+          kv:request_duration_seconds:p99_5m{op="read"} > 0.015
+          and on (shard, op) kv:requests:rate5m{op="read"} >= 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Read p99 of {{ $labels.shard }} above 15 ms"
+          description: "Read p99 above the 15 ms SLO for 5 min; the value is on the dashboard (runbook: ReadLatencyHigh)."
+
+      - alert: WriteLatencyHigh
+        expr: |
+          kv:request_duration_seconds:p99_5m{op="write"} > 0.06
+          and on (shard, op) kv:requests:rate5m{op="write"} >= 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Write p99 of {{ $labels.shard }} above 60 ms"
+          description: "Write p99 above the 60 ms SLO for 5 min; the value is on the dashboard (runbook: WriteLatencyHigh)."
+
+      # Measured on the leader, so it also grows for a follower that can't report.
+      - alert: ReplicationLagHigh
+        expr: kv_follower_lag_seconds > 10
+        for: 30s
+        labels: { severity: warning }
+        annotations:
+          summary: "Follower {{ $labels.follower }} of {{ $labels.shard }} is behind"
+          description: "More than 10 s since it last held the leader's last record (runbook: ReplicationLagHigh)."
+
+      - alert: WritesNotCommitted
+        expr: sum by (shard) (rate(kv_requests_total{code="504"}[1m])) > 0.1
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.shard }} answers writes with 504"
+          description: "Writes reach the leader but no follower confirms them in 2 s (runbook: WritesNotCommitted)."
+
+      # Burn rate: at 5% errors the hour's 0.5% budget goes in about 6 minutes. Both
+      # windows must agree, so a short spike that is already over doesn't page.
+      - alert: ErrorBudgetFastBurn
+        expr: kv:errors:ratio_rate5m > 0.05 and kv:errors:ratio_rate1m > 0.05
+        labels: { severity: critical }
+        annotations:
+          summary: Error budget burning fast
+          description: "Over 5% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
+
+      - alert: ErrorBudgetSpent
+        expr: kv:errors:ratio_rate1h > 0.005
+        labels: { severity: warning }
+        annotations:
+          summary: The hour's error budget is spent
+          description: "Over 0.5% of requests failed in the last hour; the SLO is 99.5% (runbook: ErrorBudgetSpent)."
+
+      # Always firing: its hourly message in Telegram says the monitor itself is alive.
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: info }
+        annotations:
+          summary: The monitor is alive
+          description: "An hour without this message means the monitor is down (runbook: Watchdog)."

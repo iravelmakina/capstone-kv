@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   capstone-kv app: a coordinator in a public subnet and three shard nodes, one per private
   subnet and AZ, each running one replica of each of the 2 shards (ADR-0020), on the
-  release named by AppVersion. Network IDs come from the network stack's exports
-  (ADR-0003); the image comes from the artifacts bucket. ADRs 0014, 0020, 0021.
+  release named by AppVersion, and optionally the monitor (ADR-0029). Network IDs come
+  from the network stack's exports (ADR-0003); the image comes from the artifacts bucket.
+  ADRs 0014, 0020, 0021, 0029.
 
 Parameters:
   AppVersion:
@@ -54,10 +55,16 @@ Parameters:
     Description: "true while benchmarking: adds the YCSB client instance (ADR-0016)"
     Default: "false"
     AllowedValues: ["true", "false"]
+  Monitoring:
+    Type: String
+    Description: "true during sessions that need it: adds the monitor instance and log shipping (ADR-0029)"
+    Default: "false"
+    AllowedValues: ["true", "false"]
 
 Conditions:
   WithBenchmarkClient: !Equals [!Ref BenchmarkClient, "true"]
   WithClientCidr: !Not [!Equals [!Ref AllowedClientCidr, ""]]
+  WithMonitoring: !Equals [!Ref Monitoring, "true"]
 
 Resources:
   # --- Security groups ------------------------------------------------------------------
@@ -128,6 +135,65 @@ Resources:
       ToPort: 8082
       SourceSecurityGroupId: !Ref ShardSecurityGroup
 
+  # --- Monitoring (ADR-0029) ----------------------------------------------------------
+  # The monitor reaches only the metrics ports (no item data there) and, for its probe,
+  # the coordinator's API (already open to the VPC). Nothing reaches the monitor from
+  # outside: Grafana and Prometheus are seen through SSM port forwarding. Loki takes logs
+  # from Alloy on the coordinator and the nodes.
+  MonitorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: WithMonitoring
+    Properties:
+      GroupDescription: capstone-kv monitor - Loki from the store instances only
+      VpcId: !ImportValue
+        Fn::Sub: ${NetworkStack}-VpcId
+      Tags:
+        - { Key: Name, Value: velmakina-kv-monitor-sg }
+
+  MonitorLokiFromCoordinator:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: WithMonitoring
+    Properties:
+      GroupId: !Ref MonitorSecurityGroup
+      Description: logs from Alloy on the coordinator
+      IpProtocol: tcp
+      FromPort: 3100
+      ToPort: 3100
+      SourceSecurityGroupId: !Ref CoordinatorSecurityGroup
+
+  MonitorLokiFromShards:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: WithMonitoring
+    Properties:
+      GroupId: !Ref MonitorSecurityGroup
+      Description: logs from Alloy on the shard nodes
+      IpProtocol: tcp
+      FromPort: 3100
+      ToPort: 3100
+      SourceSecurityGroupId: !Ref ShardSecurityGroup
+
+  CoordinatorMetricsFromMonitor:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: WithMonitoring
+    Properties:
+      GroupId: !Ref CoordinatorSecurityGroup
+      Description: metrics port, scraped by Prometheus on the monitor
+      IpProtocol: tcp
+      FromPort: 9180
+      ToPort: 9180
+      SourceSecurityGroupId: !Ref MonitorSecurityGroup
+
+  ShardMetricsFromMonitor:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: WithMonitoring
+    Properties:
+      GroupId: !Ref ShardSecurityGroup
+      Description: replicas' metrics ports (shard-1 9181, shard-2 9182), scraped by the monitor
+      IpProtocol: tcp
+      FromPort: 9181
+      ToPort: 9182
+      SourceSecurityGroupId: !Ref MonitorSecurityGroup
+
   # --- Instances ------------------------------------------------------------------------
   # User data is MIME multipart: the cloud-config part tells cloud-init to run the script
   # part on EVERY boot, not only the first. Changing AppVersion changes the user data,
@@ -165,10 +231,11 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
             aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
-            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} coordinator ${ExpectedShards} ${W}
+            KV_MONITOR_IP=${MonitorIp} bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} coordinator ${ExpectedShards} ${W}
             --//--
           - Bucket: !ImportValue
               Fn::Sub: ${ArtifactsStack}-BucketName
+            MonitorIp: !If [WithMonitoring, !GetAtt MonitorInstance.PrivateIp, none]
       Tags:
         - { Key: Name, Value: velmakina-kv-coordinator }
 
@@ -204,10 +271,11 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
             aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
-            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1a:8081 shard-2=2a:8082
+            KV_MONITOR_IP=${MonitorIp} bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1a:8081 shard-2=2a:8082
             --//--
           - Bucket: !ImportValue
               Fn::Sub: ${ArtifactsStack}-BucketName
+            MonitorIp: !If [WithMonitoring, !GetAtt MonitorInstance.PrivateIp, none]
       Tags:
         - { Key: Name, Value: velmakina-kv-node-a }
 
@@ -240,10 +308,11 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
             aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
-            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1b:8081 shard-2=2b:8082
+            KV_MONITOR_IP=${MonitorIp} bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1b:8081 shard-2=2b:8082
             --//--
           - Bucket: !ImportValue
               Fn::Sub: ${ArtifactsStack}-BucketName
+            MonitorIp: !If [WithMonitoring, !GetAtt MonitorInstance.PrivateIp, none]
       Tags:
         - { Key: Name, Value: velmakina-kv-node-b }
 
@@ -276,10 +345,11 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
             aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
-            bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1c:8081 shard-2=2c:8082
+            KV_MONITOR_IP=${MonitorIp} bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node ${Coordinator.PrivateIp} ${W} shard-1=1c:8081 shard-2=2c:8082
             --//--
           - Bucket: !ImportValue
               Fn::Sub: ${ArtifactsStack}-BucketName
+            MonitorIp: !If [WithMonitoring, !GetAtt MonitorInstance.PrivateIp, none]
       Tags:
         - { Key: Name, Value: velmakina-kv-node-c }
 
@@ -314,6 +384,50 @@ Resources:
       Tags:
         - { Key: Name, Value: velmakina-kv-bench-client }
 
+  # Prometheus, Alertmanager, the probe, Loki and Grafana (ADR-0029). Public subnet A, the
+  # coordinator's AZ: it pulls images from Docker Hub and sends alerts to Telegram. It finds
+  # the coordinator and the nodes by their Name tags (the role may describe instances), so
+  # it doesn't depend on them; they depend on it for its IP.
+  MonitorInstance:
+    Type: AWS::EC2::Instance
+    Condition: WithMonitoring
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: Inventory-App-Role     # S3 release files, secrets, describe-instances
+      CreditSpecification: { CPUCredits: unlimited }
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !ImportValue
+            Fn::Sub: ${NetworkStack}-PublicSubnetA
+          AssociatePublicIpAddress: true         # outbound only: images, Telegram, SSM
+          GroupSet: [!Ref MonitorSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            Content-Type: multipart/mixed; boundary="//"
+            MIME-Version: 1.0
+
+            --//
+            Content-Type: text/cloud-config; charset="us-ascii"
+
+            #cloud-config
+            cloud_final_modules:
+            - [scripts-user, always]
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+
+            #!/bin/bash
+            set -euo pipefail
+            aws s3 cp s3://${Bucket}/releases/${AppVersion}/monitor-boot.sh /usr/local/bin/monitor-boot.sh --region ${AWS::Region}
+            bash /usr/local/bin/monitor-boot.sh ${Bucket} ${AppVersion} ${AWS::StackName}
+            --//--
+          - Bucket: !ImportValue
+              Fn::Sub: ${ArtifactsStack}-BucketName
+      Tags:
+        - { Key: Name, Value: velmakina-kv-monitor }
+
 Outputs:
   CoordinatorInstanceId:
     Description: For SSM commands (smoke test, logs)
@@ -332,3 +446,7 @@ Outputs:
   BenchmarkClientInstanceId:
     Condition: WithBenchmarkClient
     Value: !Ref BenchmarkClientInstance
+  MonitorInstanceId:
+    Description: For SSM port forwarding to Grafana and Prometheus (make grafana)
+    Condition: WithMonitoring
+    Value: !Ref MonitorInstance

@@ -6,6 +6,10 @@
 #   node-boot.sh <bucket> <version> coordinator <expected-shards> <w>
 #   node-boot.sh <bucket> <version> node <coordinator-private-ip> <w> <shard>=<replica>:<port>...
 #
+# KV_MONITOR_IP (environment, M4): the monitor's private IP; when set, Grafana Alloy ships
+# the containers' logs to its Loki (ADR-0029). Each container's /metrics is published on its
+# own port: 9180 for the coordinator, the replica's port + 1100 (9181, 9182) for replicas.
+#
 # e.g. "node 10.20.0.10 2 shard-1=1a:8081 shard-2=2a:8082" runs two replica containers.
 # It installs Docker, loads the image of <version> from S3 (through the S3 gateway
 # endpoint, so private subnets need no internet) and runs each role as a container.
@@ -52,7 +56,7 @@ case "$ROLE" in
       --output text --region "$REGION" > "$KEYS/api-keys.json.new"
     mv "$KEYS/api-keys.json.new" "$KEYS/api-keys.json"
     chown -R 65532:65532 "$KEYS"
-    docker run -d --name kv-coordinator --restart always -p 8080:8080 -v "$(datadir coordinator)":/data \
+    docker run -d --name kv-coordinator --restart always -p 8080:8080 -p 9180:9180 -v "$(datadir coordinator)":/data \
       -e KV_ROLE=coordinator -e KV_EXPECTED_SHARDS="$EXPECTED" -e KV_REPLICAS=3 -e KV_W="$W" \
       -e KV_LEADERS=shard-1=1a,shard-2=2b -e KV_API_KEYS_FILE=/data/keys/api-keys.json "$IMAGE"
     ;;
@@ -62,7 +66,7 @@ case "$ROLE" in
     for spec in "$@"; do                      # shard-1=1a:8081
       SHARD=${spec%%=*} rest=${spec#*=}
       REPLICA=${rest%%:*} PORT=${rest#*:}
-      docker run -d --name "kv-$REPLICA" --restart always -p "$PORT:8080" -v "$(datadir "$REPLICA")":/data \
+      docker run -d --name "kv-$REPLICA" --restart always -p "$PORT:8080" -p "$((PORT + 1100)):9180" -v "$(datadir "$REPLICA")":/data \
         -e KV_ROLE=shard -e KV_SHARD="$SHARD" -e KV_REPLICA="$REPLICA" -e KV_W="$W" \
         -e KV_COORDINATOR_URL="http://$COORDINATOR_IP:8080" \
         -e KV_ADVERTISE_URL="http://$MY_IP:$PORT" "$IMAGE"
@@ -74,6 +78,27 @@ case "$ROLE" in
     ;;
 esac
 
-# Old images pile up with every deploy; keep only the running one.
+# 5. Logs to the monitor (ADR-0029), when there is one: Grafana Alloy reads the kv-*
+#    containers' logs from Docker and pushes them to Loki. Its image comes through S3, like
+#    the app's (private subnets have no internet); its config from the release.
+MONITOR_IP=${KV_MONITOR_IP:-none}
+docker rm -f alloy >/dev/null 2>&1 || true
+if [ "$MONITOR_IP" != none ]; then
+  ALLOY=grafana/alloy:v1.5.1
+  if ! docker image inspect "$ALLOY" >/dev/null 2>&1; then
+    aws s3 cp "s3://$BUCKET/images/alloy-v1.5.1.tar.gz" /tmp/alloy.tar.gz --region "$REGION"
+    docker load -i /tmp/alloy.tar.gz
+    rm -f /tmp/alloy.tar.gz
+  fi
+  mkdir -p /opt/kvlogs
+  aws s3 cp "s3://$BUCKET/releases/$VERSION/monitoring.tar.gz" /tmp/monitoring.tar.gz --region "$REGION"
+  tar -xzf /tmp/monitoring.tar.gz -C /opt/kvlogs alloy.alloy
+  docker run -d --name alloy --restart always --user 0 --hostname "$(hostname -s)" \
+    -e LOKI_URL="http://$MONITOR_IP:3100" \
+    -v /opt/kvlogs/alloy.alloy:/etc/alloy/config.alloy:ro -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    "$ALLOY" run /etc/alloy/config.alloy --storage.path=/tmp/alloy
+fi
+
+# Old images pile up with every deploy; keep only the running ones (Alloy's included).
 docker image prune -af >/dev/null || true
 echo "node-boot: $ROLE running $IMAGE: $(docker ps --format '{{.Names}}' | tr '\n' ' ')"

@@ -1,0 +1,49 @@
+# Prometheus for capstone-kv (ADR-0029). The same file runs locally (docker compose) and on
+# the monitor instance in AWS; only the target files differ:
+#   targets/coordinator.json, targets/replicas.json, targets/probe.json
+# locally from monitoring/targets-local/, in AWS written by scripts/monitor-boot.sh from
+# the app stack's private IPs.
+global:
+  scrape_interval: 5s        # a stopped node shows within one scrape (design: detection time)
+  evaluation_interval: 5s    # rules are evaluated as often as data arrives
+  scrape_timeout: 4s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # The coordinator's metrics port (9180): requests, latency, replicas up, leaders.
+  - job_name: coordinator
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/coordinator.json]
+
+  # Every replica's metrics port (9181 for shard-1, 9182 for shard-2 in AWS; 9180 inside
+  # each container locally). Shard and replica come as labels on the series themselves.
+  - job_name: replica
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/replicas.json]
+
+  # The outside view of availability (ADR-0025): an authenticated read through the
+  # coordinator every 5 s, made by the blackbox exporter with the read-only probe key.
+  - job_name: probe
+    metrics_path: /probe
+    params:
+      module: [kv_read]
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/probe.json]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

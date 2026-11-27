@@ -24,7 +24,7 @@ VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
 .PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down rebuild-replica smoke \
-        up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys
+        up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys monitoring-images monitoring-check grafana prometheus
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
@@ -120,6 +120,7 @@ test:            ## go vet + all Go tests (incl. contract test and ring distribu
 keys:            ## make local API keys in secrets/ (git-ignored), unless they exist (ADR-0027)
 	@scripts/new-api-keys.sh secrets
 	@mkdir -p secrets/telegram   # telegram_token, telegram_chat_id: see docs/m4/runbook.md
+	@test -s secrets/grafana_password || (umask 077; openssl rand -hex 16 > secrets/grafana_password)
 
 local-up: keys   ## build the image and start coordinator + 2 shards x 3 replicas in Docker
 	docker compose up --build -d
@@ -153,7 +154,7 @@ up-artifacts:    ## create/update the S3 artifacts stack (once; it stays)
 # a commit, or AppVersion=<sha> would lie about what runs.
 release:         ## build + upload the image of the current commit (VERSION=<sha>)
 	@set -euo pipefail; \
-	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh scripts/smoke.sh scripts/smoke-replica.sh)" ]; then \
+	if [ -n "$$(git status --porcelain -- cmd internal go.mod go.sum Dockerfile scripts/node-boot.sh scripts/monitor-boot.sh scripts/smoke.sh scripts/smoke-replica.sh monitoring)" ]; then \
 	  echo "uncommitted changes in app files: commit first, a release is named by its commit"; exit 1; fi; \
 	[ -n "$(BUCKET)" ] || { echo "no artifacts bucket: run make up-artifacts"; exit 1; }; \
 	if $(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null 2>&1; then \
@@ -163,9 +164,12 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	$(AWS) s3 cp scripts/node-boot.sh s3://$(BUCKET)/releases/$(VERSION)/node-boot.sh; \
 	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \
 	$(AWS) s3 cp scripts/smoke-replica.sh s3://$(BUCKET)/releases/$(VERSION)/smoke-replica.sh; \
+	$(AWS) s3 cp scripts/monitor-boot.sh s3://$(BUCKET)/releases/$(VERSION)/monitor-boot.sh; \
+	tar -czf - -C monitoring . | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/monitoring.tar.gz; \
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
 BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
+MONITORING ?= false   # MONITORING=true adds the monitor and log shipping (ADR-0029)
 EXPECTED_SHARDS ?= 2
 W ?= 2           # write quorum (ADR-0021): 2, or 1 for the benchmark's W = 1 run
 # The AMI is pinned per stack (ADR-0017). IMAGE_ID=ami-... upgrades it deliberately (the
@@ -184,7 +188,7 @@ up-app:          ## deploy the app stack running VERSION (BENCH=true adds the cl
 	else image="ParameterKey=ImageId,ParameterValue=$$($(AWS) ssm get-parameter --name $(AMI_PARAMETER) --query Parameter.Value --output text)"; fi; \
 	echo "AMI: $$image"; \
 	$(MAKE) --no-print-directory up STACK=$(APP_STACK) TEMPLATE=infra/app.yaml \
-	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) $(if $(strip $(CLIENT_CIDR)),ParameterKey=AllowedClientCidr$(comma)ParameterValue=$(strip $(CLIENT_CIDR))) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
+	  PARAMS="ParameterKey=AppVersion,ParameterValue=$(VERSION) $(if $(strip $(CLIENT_CIDR)),ParameterKey=AllowedClientCidr$(comma)ParameterValue=$(strip $(CLIENT_CIDR))) ParameterKey=BenchmarkClient,ParameterValue=$(strip $(BENCH)) ParameterKey=Monitoring,ParameterValue=$(strip $(MONITORING)) ParameterKey=ExpectedShards,ParameterValue=$(EXPECTED_SHARDS) ParameterKey=W,ParameterValue=$(strip $(W)) $$image"
 
 down-app:        ## delete the app stack (end of every lab session: it costs money)
 	@set -euo pipefail; \
@@ -254,12 +258,14 @@ smoke-replica:   ## smoke test with one follower per shard down (stops and resta
 	onCoord up $$host; \
 	echo "smoke-replica passed"
 
-# secrets (lab session, a write call): creates or updates the three API-key secrets from
-# the files `make keys` made (ADR-0027). Values go through file:// so they never appear on
-# a command line or in this output.
-secrets:         ## create/update velmakina-kv/api-keys, ops-key, probe-key from secrets/ (author approves)
+# secrets (lab session, a write call): creates or updates the API-key secrets (ADR-0027)
+# and the monitor's (Telegram bot, Grafana password; ADR-0029) from the files in secrets/.
+# Values go through file:// so they never appear on a command line or in this output.
+secrets:         ## create/update the velmakina-kv/* secrets from secrets/ (author approves)
 	@set -euo pipefail; \
-	for pair in api-keys:secrets/api-keys.json ops-key:secrets/ops.key probe-key:secrets/probe.key; do \
+	python3 -c 'import json, os; r = lambda f: open(f).read().strip() if os.path.exists(f) else ""; json.dump({k: r(f) for k, f in [("telegram_token", "secrets/telegram/telegram_token"), ("telegram_chat_id", "secrets/telegram/telegram_chat_id"), ("grafana_password", "secrets/grafana_password")]}, open("secrets/monitoring.json", "w"))'; \
+	chmod 600 secrets/monitoring.json; \
+	for pair in api-keys:secrets/api-keys.json ops-key:secrets/ops.key probe-key:secrets/probe.key monitoring:secrets/monitoring.json; do \
 	  name=velmakina-kv/$${pair%%:*} file=$${pair#*:}; \
 	  test -s "$$file" || { echo "$$file missing: run make keys"; exit 1; }; \
 	  if $(AWS) secretsmanager describe-secret --secret-id $$name >/dev/null 2>&1; then \
@@ -280,6 +286,34 @@ rotate-keys:     ## refresh the coordinator's API keys from Secrets Manager
 	  --query Command.CommandId --output text); \
 	$(AWS) ssm wait command-executed --command-id $$cmd --instance-id $$id; \
 	echo "keys file refreshed on $$id"
+
+# --- M4: monitoring (ADR-0029) ----------------------------------------------------------
+
+# monitoring-images (lab session, once): the Alloy image for the private nodes, which have
+# no internet, through the artifacts bucket like the app image.
+ALLOY_IMAGE := grafana/alloy:v1.5.1
+monitoring-images: ## upload the Alloy image to s3://<bucket>/images/ (once)
+	@set -euo pipefail; \
+	if $(AWS) s3 ls s3://$(BUCKET)/images/alloy-v1.5.1.tar.gz >/dev/null 2>&1; then echo "Alloy image already in S3"; exit 0; fi; \
+	docker pull --platform linux/amd64 $(ALLOY_IMAGE); \
+	docker save $(ALLOY_IMAGE) | gzip | $(AWS) s3 cp - s3://$(BUCKET)/images/alloy-v1.5.1.tar.gz; \
+	echo "uploaded $(ALLOY_IMAGE)"
+
+# monitoring-check: the alert rules' unit tests and the configs, with the same tools the
+# images carry (CI runs the rule tests too).
+monitoring-check: ## promtool: the alert rules' unit tests and a rules check (Docker)
+	docker run --rm -v "$(CURDIR)/monitoring:/m" -w /m --entrypoint promtool prom/prometheus:v3.1.0 test rules rules_test.yml
+	docker run --rm -v "$(CURDIR)/monitoring:/m" -w /m --entrypoint promtool prom/prometheus:v3.1.0 check rules rules.yml
+
+# grafana / prometheus: SSM port forwarding to the monitor (no public ingress). Needs the
+# Session Manager plugin for the AWS CLI. Leave it running; Ctrl-C ends it.
+grafana:         ## Grafana of the AWS monitor on http://localhost:3000 (SSM port forwarding)
+	@id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='MonitorInstanceId'].OutputValue" --output text); \
+	$(AWS) ssm start-session --target $$id --document-name AWS-StartPortForwardingSession --parameters portNumber=3000,localPortNumber=3000
+
+prometheus:      ## Prometheus of the AWS monitor on http://localhost:9090 (SSM port forwarding)
+	@id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='MonitorInstanceId'].OutputValue" --output text); \
+	$(AWS) ssm start-session --target $$id --document-name AWS-StartPortForwardingSession --parameters portNumber=9090,localPortNumber=9090
 
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,

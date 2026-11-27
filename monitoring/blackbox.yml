@@ -1,0 +1,13 @@
+# The availability probe (ADR-0025, ADR-0029): an authenticated read through the
+# coordinator. 200 or 404 means the store answered (the probe item may not exist); 401
+# means the probe key is wrong, 503 that the shard can't serve: both count as failures.
+modules:
+  kv_read:
+    prober: http
+    timeout: 3s
+    http:
+      method: GET
+      valid_status_codes: [200, 404]
+      authorization:
+        type: Bearer
+        credentials_file: /etc/blackbox/probe.key
