@@ -27,7 +27,7 @@
 - [x] 3.5 Last-write-wins against the key's latest record in the log; the superseded answer waits for that record's commit (504 if it times out)
 - [x] 3.6 `ETag` (the stamp) and `X-KV-Timestamp` on reads; `If-Match` on PUT and DELETE, `If-None-Match: *` on PUT, 412 otherwise
 - [x] 3.7 Tests: stamps rise across a promotion, a late retry is superseded, superseded only after commit, a future stamp refused, `If-Match` and `If-None-Match` conflicts
-- [ ] 3.8 `scripts/failure-tests.sh` still passes, plus a late-retry scenario
+- [x] 3.8 `scripts/failure-tests.sh` still passes, plus a late-retry scenario
 
 ## 4. API keys
 
@@ -48,7 +48,7 @@
 - [x] 6.1 `monitoring/`: Prometheus config and alert rules with `promtool` tests, Alertmanager config (Telegram, timings), blackbox exporter config, Grafana provisioning and the dashboard as JSON, Loki and Alloy configs
 - [x] 6.2 `docker-compose.yml` runs the stack next to the cluster; secrets from a git-ignored file
 - [x] 6.3 `promtool check config`, `promtool test rules`, `amtool check-config` pass
-- [ ] 6.4 Local drills: a follower stopped (`NodeDown` fires and resolves), the coordinator stopped (`CoordinatorDown`), one request ID followed in Loki to the followers; output in `docs/m4/evidence/local-docker.txt`
+- [x] 6.4 Local drills: a follower stopped (`NodeDown` fires and resolves), the coordinator stopped (`CoordinatorDown`), one request ID followed in Loki to the followers; output in `docs/m4/evidence/local-docker.txt`
 
 ## 7. Infrastructure
 

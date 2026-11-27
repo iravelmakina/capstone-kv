@@ -1,0 +1,189 @@
+M4 local checks in docker compose, run on 2026-11-27 ~10:00 UTC by Claude Code (author's
+standing instruction), after Docker Desktop worked again. Fresh stack: `docker compose down -v
+&& make local-up` (cluster: coordinator + 2 shards x 3 replicas, W = 2; monitoring:
+Prometheus, Alertmanager, blackbox probe, Loki, Alloy, Grafana; the same configuration files
+as the monitor instance in AWS). No Telegram bot yet, so alerts were read from Alertmanager's
+API (what it would send). Key values are never printed; both outputs below were checked for
+the first 16 characters of every key in secrets/ (none found).
+
+Covers tasks 3.8 (failure tests + late retry), 4.3 (local part: smoke and failure tests with
+the ops key) and 6.4 (local drills). Not covered here: anything needing separate hosts or AWS
+(smoke-replica on EC2, `make rotate-keys` through SSM, the benchmark client against AWS).
+
+
+===== [S] stack up (`make local-up`, then `make smoke`) =====
+coordinator ready 7 s after `up`; 13 services Up.
+smoke test passed against http://localhost:8080 (with the ops key)
+Prometheus targets (all up): coordinator coordinator:9180; probe (blackbox, read with the
+  probe key); replica r1a..r2c :9180 (6); prometheus itself.
+rules loaded: 2 groups, 19 rules; active at start: Watchdog only.
+Grafana /api/health 200; Alertmanager /-/ready 200; Loki /ready "ready" after ~1 min
+(503 while its ring settles); Loki streams for all 7 store containers, labels container,
+host, level (request ID stays in the line).
+
+
+===== [3.8] scripts/failure-tests.sh (KV_API_KEY = ops key), unedited output =====
+
+===== [M3-L1] cluster ready: two replica sets, first leaders 1a and 2b, epoch 1 =====
+ok   coordinator ready
+{"id":"shard-1","epoch":1,"leader":"1a","live":["1a","1b","1c"]}
+{"id":"shard-2","epoch":1,"leader":"2b","live":["2a","2b","2c"]}
+ok   shard-1 leader (1a)
+ok   shard-2 leader (2b)
+
+===== [M3-L2] 200 puts reach every replica (spec: Follower stays current) =====
+ok   200 puts (shard-1 got 107, shard-2 got 93)
+ok   1b and 1c at the leader's LSN
+ok   2a and 2c at the leader's LSN
+{"replica":"1a","role":"leader","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"1b","role":"follower","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"1c","role":"follower","epoch":1,"last":107,"lag":0,"keys":107}
+{"replica":"2a","role":"follower","epoch":1,"last":95,"lag":0,"keys":93}
+{"replica":"2b","role":"leader","epoch":1,"last":95,"lag":0,"keys":93}
+{"replica":"2c","role":"follower","epoch":1,"last":95,"lag":0,"keys":93}
+
+===== [M3-L3] reads spread over all replicas (spec: Balanced reads, R = 2) =====
+3000 reads of k1 -> replica reads: 1a=2000 1b=2000 1c=2000 (want 1800-2200 each)
+ok   balanced
+
+===== [M3-L4] a follower stops and restarts (specs: One follower down, Follower restarts behind) =====
+$ docker compose stop r1b
+ok   put with 1b down (200)
+ok   read k1 with 1b down (200)
+ok   read k2 with 1b down (200)
+ok   read k3 with 1b down (200)
+ok   read k4 with 1b down (200)
+ok   read k5 with 1b down (200)
+leader 1a now at LSN 157; 1b stopped behind it
+$ docker compose start r1b
+ok   1b caught up with the leader
+     r1b-1  | {"time":"2026-11-27T10:00:05.227790054Z","level":"INFO","msg":"shard-1/1b: 107 keys replayed up to LSN 107, reporting to http://coordinator:8080 as http://r1b:8080","role":"shard","shard":"shard-1","replica":"1b"}
+{"replica":"1b","role":"follower","last":157,"lag":0}
+
+===== [M3-L5] both followers down (spec: Both followers down; Two replicas down) =====
+k2 holds {"round":2,"i":1}
+$ docker compose stop r1b r1c
+put took 2s
+ok   put with both followers down (504)
+ok   read with two replicas down (503)
+{"shard-1":{"notCommitted504":1,"unavailable503":1},"shard-2":{"notCommitted504":0,"unavailable503":0}}
+ok   the leader still shows the committed value ({"round":2,"i":1})
+
+===== [M3-L6] leader replaced; the former leader drops its uncommitted write (specs: Leader replaced, Former leader returns) =====
+$ docker compose stop r1a
+$ docker compose start r1b r1c
+waiting for 1a to be detected as dead (15 s) and a follower promoted...
+ok   shard-1 promoted to epoch 2
+new leader of shard-1: 1b
+ok   put on the new leader
+ok   committed k1 survived (200)
+ok   committed k2 survived (200)
+ok   committed k3 survived (200)
+ok   committed k4 survived (200)
+ok   committed k5 survived (200)
+ok   the 504 put never appeared ({"round":2,"i":1})
+$ docker compose start r1a
+ok   1a back as a follower at the new leader's LSN
+     r1a-1  | {"time":"2026-11-27T10:00:31.134798969Z","level":"INFO","msg":"replica 1a: log disagrees with the leader after LSN 157; cutting back","role":"shard","shard":"shard-1","replica":"1a"}
+{"replica":"1a","role":"follower","epoch":2,"leader":"1b","last":{"epoch":2,"lsn":158}}
+
+===== [M3-L7] leader and one follower down: no promotion (spec: Only one follower live) =====
+$ docker compose stop r2b r2c
+ok   shard-2 still epoch 1 (1)
+ok   shard-2 leader unchanged (2b)
+ok   put to shard-2 (503)
+ok   read from shard-2 (1 replica live) (503)
+ok   shard-1 unaffected (200)
+$ docker compose start r2b r2c
+ok   shard-2 writable again
+
+===== [M3-L8] coordinator restart keeps leaders and epochs (spec: Coordinator restart keeps the leader) =====
+$ docker compose restart coordinator
+ok   coordinator ready again
+before: [{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}]
+after:  [{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}]
+ok   same leaders and epochs ([{"id":"shard-1","epoch":2,"leader":"1b"},{"id":"shard-2","epoch":1,"leader":"2b"}])
+
+===== [M3-L9] rebuild a replica from the leader (spec: Rebuild) =====
+$ make rebuild-replica R=1c
+ok   1c rebuilt and caught up
+     r1c-1  | {"time":"2026-11-27T10:01:04.000107845Z","level":"INFO","msg":"shard-1/1c: 0 keys replayed up to LSN 0, reporting to http://coordinator:8080 as http://r1c:8080","role":"shard","shard":"shard-1","replica":"1c"}
+{"replica":"1c","role":"follower","last":158,"keys":108}
+
+===== [M4-L11] a late retry loses to a newer write (spec: Late retry loses) =====
+$ docker compose stop r2a r2c
+ok   A's put timed out with a stamp (yes)
+$ docker compose start r2a r2c
+ok   shard-2 writable again
+ok   A's retry with its first stamp is superseded (true)
+ok   reads return B's value ({"by":"B"})
+
+===== [M3-L10] smoke test after all of it =====
+smoke test passed against http://localhost:8080
+
+all failure tests passed
+
+
+===== [6.4] local drills (alerts timed from `docker compose stop` to active in Alertmanager) =====
+Second run, kept as the evidence. The first run differed only in D3: the script stopped
+waiting once two lines matched (coordinator and leader), before the followers' lines reached
+Loki; the script now waits for those too.
+M4 local drills (task 6.4), docker compose, 2026-11-27 10:02 UTC.
+Scrape and rule evaluation every 5 s; Alertmanager group_wait 5 s; heartbeat timeout 15 s.
+Leaders now:
+   {'__name__': 'kv_shard_leader_epoch', 'instance': 'coordinator:9180', 'job': 'coordinator', 'leader': '2b', 'shard': 'shard-2'} 1
+   {'__name__': 'kv_shard_leader_epoch', 'instance': 'coordinator:9180', 'job': 'coordinator', 'leader': '1b', 'shard': 'shard-1'} 2
+
+===== [D1] a follower stopped: NodeDown fires and resolves =====
+shard-1 leader is 1b; stopping follower r1c (node r1c)
+ReplicaDown active after: 18 s
+NodeDown active after:    18 s
+writes while it is down: 20 of 20 answered 200 (quorum of 2 left)
+alerts active now:
+   Watchdog 
+   ReplicaDown r1c
+   NodeDown r1c
+after start: NodeDown resolved after 4 s, ReplicaDown after 4 s
+
+===== [D2] the coordinator stopped: CoordinatorDown =====
+CoordinatorDown active after: 15 s
+  probe_success:
+   {'__name__': 'probe_success', 'instance': 'http://coordinator:8080/v1/tables/probe/items/probe', 'job': 'probe'} 0
+  up{job=coordinator}:
+   {'__name__': 'up', 'instance': 'coordinator:9180', 'job': 'coordinator'} 0
+coordinator ready again after 6 s
+CoordinatorDown resolved after 10 s
+  put a1 after the restart -> 200
+  put a2 after the restart -> 200
+  put a3 after the restart -> 200
+  put a4 after the restart -> 200
+
+===== [D3] one request ID followed in Loki, coordinator -> leader -> followers =====
+request ID drill-1795773798; waiting for Loki
+LogQL: {container=~".+"} |= "drill-1795773798"
+   capstone-kv-r2b-1 {"level": "INFO", "msg": "write", "role": "shard", "shard": "shard-2", "replica": "2b", "request_id": "drill-1795773798", "op": "write", "epoch": 1, "lsn": 123, "stamp": 117687831634378752, "status": 200, "commit_wait_ms": 1.32}
+followers of shard-2 whose appended LSN range covers 123:
+LogQL: {container=~".+"} | json | msg="appended" | shard="shard-2" | from_lsn <= 123 | to_lsn >= 123
+   capstone-kv-r2c-1 {"level": "INFO", "msg": "appended", "role": "shard", "shard": "shard-2", "replica": "2c", "from_lsn": 123, "to_lsn": 123, "epoch": 1}
+   capstone-kv-r2a-1 {"level": "INFO", "msg": "appended", "role": "shard", "shard": "shard-2", "replica": "2a", "from_lsn": 123, "to_lsn": 123, "epoch": 1}
+
+Note on D3: in this run the coordinator's line is missing from the first query. D2 had just
+restarted the coordinator, and Alloy's Docker discovery refreshes every 60 s by default, so a
+restarted container's logs reached Loki up to a minute late (nothing lost: they were
+backfilled from Docker; the same query a minute later returned both the leader's and the
+coordinator's line):
+  capstone-kv-r2b-1         {"msg":"write", ... "request_id":"drill-1795773798","lsn":123, ...}
+  capstone-kv-coordinator-1 {"msg":"request", ... "request_id":"drill-1795773798","principal":"ops","op":"write","status":200,"shard":"shard-2", ...}
+Fix: `refresh_interval = "5s"` in monitoring/alloy.alloy. Re-measured after the fix: a
+request made right after `docker compose restart coordinator` was in Loki 13 s after the
+restart (about 6 s of it the coordinator starting up).
+
+What the drills show against the design (ADR-0026/0029; heartbeat timeout 15 s):
+- follower stopped: ReplicaDown and NodeDown in Alertmanager after 17-18 s (15 s heartbeat
+  timeout + one scrape and evaluation); writes kept answering 200 (20 of 20, quorum of 2);
+  both resolved 4 s after the start.
+- coordinator stopped: CoordinatorDown after 15 s (probe and scrape fail at once, then
+  `for: 10s`); resolved ~10 s after the start; writes 200 right after the restart (the M3
+  bug fixed in c1a6c44 does not come back).
+- one request followed: coordinator (principal, shard, key hash) -> leader (request ID ->
+  LSN 123) -> both followers (appended range covering LSN 123).

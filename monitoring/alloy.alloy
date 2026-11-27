@@ -7,6 +7,9 @@
 
 discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
+  // The default (1m) left a restarted container's logs out of Loki for up to a minute
+  // (local drill D3, docs/m4/evidence/local-docker.txt); nothing is lost, Docker keeps them.
+  refresh_interval = "5s"
 }
 
 discovery.relabel "kv" {
