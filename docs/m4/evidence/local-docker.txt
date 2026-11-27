@@ -198,4 +198,4 @@ alertmanager_notifications_total{integration="telegram"} / _failed_total:
          (two messages: ReplicaDown and NodeDown, grouped by alertname, node, shard)
 11:42:03 r1c started; resolved notification sent 30 s after start; sent=5 failed=0
          (resolved messages go out on the next group_interval, 30 s)
-Telegram's API accepted every message (no failures); what the chat shows is for the author to confirm.
+Telegram's API accepted every message (no failures); the author confirmed all 5 in the bot's chat.
