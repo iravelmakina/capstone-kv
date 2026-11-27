@@ -1,0 +1,205 @@
+M4 deploy to AWS Academy (us-east-1) with monitoring, 2026-11-27 (times UTC).
+Releases eee86c664097, then d8f41f62a6bc (three fixes found in this session, below).
+Account IDs replaced with <ACCOUNT_ID>. Commands run from the laptop with profile academy;
+each write call approved by the author in chat. Checks on the instances through SSM; the
+monitor (Prometheus, Grafana, Loki) reached through SSM port forwarding only.
+Run by Claude Code (Opus 5.5) with the author's approvals; output below is unedited apart
+from the account ID and lines cut where marked "...".
+
+===== [S1] first deploy rolled back: an apostrophe in a rule description =====
+$ make up-app MONITORING=true BENCH=true      (12:49)
+change set: 17 resources to add (3 instances of the store, coordinator, monitor, client,
+4 security groups, 7 ingress rules)
+Waiter StackCreateComplete failed: ... "ROLLBACK_COMPLETE"
+stack events, the failing one:
+2026-11-27T12:50:19  ShardMetricsFromMonitor  CREATE_FAILED  Resource handler returned
+  message: "Invalid rule description. Valid descriptions are strings less than 256
+  characters from the following set:  a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*
+  (Service: Ec2, Status Code: 400, ...)"
+2026-11-27T12:50:20  velmakina-kv-app  ROLLBACK_IN_PROGRESS  The following resource(s)
+  failed to create: [ShardFromShard, MonitorInstance, ShardMetricsFromMonitor,
+  BenchmarkClientInstance, MonitorLokiFromShards, Coordinator]. Rollback requested by user.
+2026-11-27T12:58:58  velmakina-kv-app  ROLLBACK_COMPLETE
+# The description said "monitor's"; cfn-lint accepts it, EC2 doesn't. Fix 7a21f4c: the
+# description reworded, and scripts/check-sg-descriptions.py (every rule description against
+# EC2's character set) added to `make lint` and to CI.
+$ aws cloudformation delete-stack velmakina-kv-app; make up-app MONITORING=true BENCH=true
+CREATE_COMPLETE
+
+===== [S2] smoke test, release eee86c664097 (ops key from Secrets Manager) =====
+$ make smoke-aws
+ok   coordinator version (eee86c664097)
+ok   shard http://10.20.66.69:8081 version (eee86c664097)
+ok   shard http://10.20.83.187:8081 version (eee86c664097)
+ok   shard http://10.20.103.159:8081 version (eee86c664097)
+ok   shard http://10.20.66.69:8082 version (eee86c664097)
+ok   shard http://10.20.83.187:8082 version (eee86c664097)
+ok   shard http://10.20.103.159:8082 version (eee86c664097)
+ok   create table (409)
+ok   CREATE (200)
+ok   READ (200)
+ok   READ returns value ({"hello":"world"})
+ok   EXISTS (200)
+ok   DELETE (204)
+ok   READ after delete (404)
+ok   EXISTS after delete (404)
+smoke test passed against http://localhost:8080
+SSM status: Success
+# The first run listed 4 shards: node A registered after the check started. The rerun
+# above lists all 6.
+
+===== [S3] two problems on the monitor and the nodes, found through the tunnels =====
+1. Grafana restarted in a loop. `make release` packed monitoring/ with macOS tar, which
+   adds AppleDouble files (`._name`); Grafana read `._dashboards.yml` as provisioning and
+   exited. docker compose mounts the folder directly, so local runs never saw it. Fixed on
+   the monitor through SSM (the `._*` files deleted, author approved), then in code
+   (f20cfbc): `COPYFILE_DISABLE=1 tar --exclude='._*'`, and monitor-boot.sh deletes any
+   `._*` after extracting.
+2. Loki had no logs. node-boot.sh extracted `alloy.alloy` from the archive, whose members
+   are `./alloy.alloy`; GNU tar found nothing and Alloy never started. Fixed in d8f41f62
+   (extract `./alloy.alloy`; `tar --no-xattrs` so macOS attributes don't become pax
+   headers). New release d8f41f62a6bc uploaded and the stack updated (author approved);
+   the user data change updated the instances in place.
+
+===== [S4] smoke test, release d8f41f62a6bc =====
+$ make smoke-aws
+ok   coordinator version (d8f41f62a6bc)
+ok   shard http://10.20.66.69:8081 version (d8f41f62a6bc)
+ok   shard http://10.20.83.187:8081 version (d8f41f62a6bc)
+ok   shard http://10.20.103.159:8081 version (d8f41f62a6bc)
+ok   shard http://10.20.66.69:8082 version (d8f41f62a6bc)
+ok   shard http://10.20.83.187:8082 version (d8f41f62a6bc)
+ok   shard http://10.20.103.159:8082 version (d8f41f62a6bc)
+ok   create table (409)
+ok   CREATE (200)
+...  (same 7 checks as S2, all ok)
+smoke test passed against http://localhost:8080
+SSM status: Success
+
+===== [S5] monitoring through SSM port forwarding (raw output not kept) =====
+$ make prometheus; make grafana      (SSM port forwarding to 9090 and 3000)
+- Prometheus: 9 of 9 targets up (coordinator, 6 replicas, blackbox probe, itself).
+- Loki: streams from 7 containers (kv-coordinator, kv-1a..kv-2c) on 4 hosts.
+- Grafana: dashboard capstone-kv with 17 panels; Prometheus and Loki data sources pass
+  their health check. The Alertmanager data source fails Grafana's health check ("Plugin
+  unavailable", HTTP 500) but its queries work through the proxy; not fixed.
+- Right after start, ErrorBudgetFastBurn and ErrorBudgetSpent fired: 4 probe 503s
+  while the cluster formed, at almost no traffic, are a large share of an hour. See the
+  note at the end.
+
+===== [D1] a follower node stopped: make smoke-replica (14:58:52) =====
+before: shard-1 leader 1b, shard-2 leader 2b (epoch 1); replicas up: 6; firing: Watchdog
+   stopping node i-00c98da23a578352b (10.20.103.159): one follower of each shard
+   stop-instances at 14:59:01
+   ReplicaDown firing after: 17 s
+   NodeDown firing after:    17 s
+   replicas up while it is down: 4 of 6
+   smoke-replica output:
+     ok   every replica on 10.20.103.159 reported down
+     ok   10 puts committed and read back, then deleted, with 10.20.103.159 down
+     starting i-00c98da23a578352b
+     ok   every replica on 10.20.103.159 back and at its leader's last record
+     smoke-replica passed
+   NodeDown resolved 0 s after smoke-replica finished (it waits for the node to catch up)
+# Alert times count from stop-instances: 15 s heartbeat timeout, then the 5 s scrape and
+# evaluation. No 5xx counter was read for this window (only the 10 puts, all 200); the
+# Prometheus data on the monitor still has it if the stack comes back.
+
+===== [D2] a leader node stopped under workload A (15:00:04) =====
+   workload running: 162 req/s
+   leaders before: shard-1 1b, shard-2 2b (epoch 1)
+   shard-1 leader 1b is on node 10.20.83.187 (i-00ab1abfeec12f4ec); replicas on that node:
+    {'node': '10.20.83.187', 'replica': '1b', 'shard': 'shard-1'} 1
+    {'node': '10.20.83.187', 'replica': '2b', 'shard': 'shard-2'} 1
+   stop-instances at 15:01:28
+   shard-1 promoted after 16 s (new leader seen by Prometheus)
+   NodeDown firing after: 20 s
+   leaders after: shard-1 1a, shard-2 2c (epoch 2)
+   5xx since the stop: 50322
+    {'code': '500', 'op': 'write'} 0
+    {'code': '503', 'op': 'write'} 43128.27577142857
+   read p99 by shard over the last 2 min (s):
+    {'shard': 'shard-2'} 0.019775414450602154
+    {'shard': 'shard-1'} 0.014494345949795647
+   write p99 by shard over the last 2 min (s):
+    {'shard': 'shard-2'} 0.059142825266708735
+    {'shard': 'shard-1'} 0.05840578172652734
+   firing now: Watchdog, ErrorBudgetFastBurn (critical), ErrorBudgetSpent,
+    NodeDown 10.20.83.187, ReplicaDown 1b, ReplicaDown 2b, ScrapeFailing (x2)
+   node running again at 15:02:27
+   NodeDown resolved 1 s after it was running
+   workload A (1 run, label drill-leader) during the drill:
+     INSERT       - Takes(s): 85.8, Count: 49680, OPS: 579.3, 99th(us): 54687
+     INSERT_ERROR - Takes(s): 14.7, Count: 50320, OPS: 3417.3, Avg(us): 4636, 99th(us): 12183
+     READ         - Takes(s): 785.9, Count: 451582, OPS: 574.6, 99th(us): 17231, Max(us): 1010175
+     READ_ERROR   - Takes(s): 785.9, Count: 47887, OPS: 60.9
+     UPDATE       - Takes(s): 785.9, Count: 500531, OPS: 636.9, 99th(us): 57567
+     saved to bench-results/d8f41f62a6bc/20261127T151504Z-drill-leader.txt and
+     s3://velmakina-kv-artifacts-<ACCOUNT_ID>/bench-results/d8f41f62a6bc/...-drill-leader.txt
+# What this shows:
+# - Both leaders were on the stopped node. Node A registered late at start (S2), so 1b won
+#   shard-1's first election instead of 1a (ADR-0020 expects 1a and 2b). Both shards
+#   stopped taking writes for 14.7 s (INSERT_ERROR span), and both promoted (epoch 2).
+# - The stop landed in the load phase (inserts only). A 503 comes back in ~5 ms against
+#   ~23 ms for a committed write, so the 16-thread client sent 3417 failing writes per
+#   second: 50320 errors in 14.7 s, about as many as the whole phase's successful inserts.
+# - No read 5xx (only write series in the 5xx query). The 47887 READ_ERROR are, most
+#   likely, reads of keys whose insert failed (404 counts as an error in go-ycsb); not
+#   checked key by key.
+# - Read p99 of shard-2 over those 2 minutes was 19.8 ms, above the 15 ms SLO; read max
+#   1.01 s, not the 3 s client timeout ADR-0026 feared. Write p99 58-59 ms, under 60 ms.
+# - Against ADR-0026: it assumed one leader change costs ~20 s of 503 on one shard's
+#   writes, ≈ 0.14% of an hour's requests. Here one node held both leaders and the
+#   closed-loop client multiplied the failures: ~50k 5xx in about 1.05 M requests (≈ 4.8%)
+#   spent the hour's budget at once. Whether to supersede ADR-0026 (or ADR-0020's leader
+#   placement) is the author's decision; not done here.
+
+===== [D3] the coordinator container stopped (15:15:06) =====
+   docker stop at 15:15:10
+   CoordinatorDown firing after: 8 s
+   probe_success: 0, up{coordinator}: 0
+   docker start at 15:15:23
+   CoordinatorDown resolved 10 s after the start
+   ok   CREATE (200)
+   ok   READ (200)
+   ok   DELETE (204)
+   smoke test passed against http://localhost:8080
+   SSM status: Success
+
+===== [L] one request followed in Loki (coordinator -> leader -> followers) (15:15:43) =====
+   put -> 200
+   request ID aws-trace-1795792543
+   LogQL: {container=~".+"} |= "aws-trace-1795792543"
+     kv-1a ip-10-20-66-69 {"level": "INFO", "msg": "write", "role": "shard", "shard": "shard-1", "replica": "1a", "request_id": "aws-trace-1795792543", "op": "write", "epoch": 2, "lsn": 267505, "stamp": 117689060223156224, "status": 200, "commit_ ...
+     kv-coordinator ip-10-20-2-109 {"level": "INFO", "msg": "request", "role": "coordinator", "request_id": "aws-trace-1795792543", "principal": "ops", "op": "write", "status": 200, "duration_ms": 6.022, "shard": "shard-1", "key_hash": "acbfa3ef3da11506"}
+   followers of shard-1 whose appended range covers LSN 267505:
+   LogQL: {container=~".+"} | json | msg="appended" | shard="shard-1" | from_lsn <= 267505 | to_lsn >= 267505
+     kv-1c ip-10-20-103-159 {"level": "INFO", "msg": "appended", "role": "shard", "shard": "shard-1", "replica": "1c", "from_lsn": 267505, "to_lsn": 267505, "epoch": 2}
+     kv-1b ip-10-20-83-187 {"level": "INFO", "msg": "appended", "role": "shard", "shard": "shard-1", "replica": "1b", "from_lsn": 267505, "to_lsn": 267505, "epoch": 2}
+# Lines from three hosts in one query: the coordinator, the new leader 1a and both
+# followers (1b back after D2, as a follower).
+
+===== [T] notifications sent by Alertmanager on the monitor (15:16:54) =====
+   alertmanager_notifications_total{integration="telegram"} 38
+# Alertmanager's counter since its container started (firing and resolved messages,
+# grouped). The failed-notification counter was not read.
+
+===== [B] workload A with metrics on, 3 runs (task 8.3): result not collected =====
+$ make bench-aws WORKLOADS=a LABEL=m4-metrics      (15:17)
+SSM command bcf93a7a-a4a4-460c-9269-4f83384101c4 started 15:17:10 UTC; polling every 30 s
+# The lab session ended while it ran (every call then refused: explicit deny by the
+# lab's voc-cancel-cred policy). The poll loop read every error as "Pending" and polled
+# for 3 hours until stopped by hand; fixed in the Makefile (bounded poll, stops after 10
+# failed calls). The client writes nothing to S3, so the summaries are only in the SSM
+# command's output: to fetch in the next lab session with
+#   aws ssm get-command-invocation --command-id bcf93a7a-a4a4-460c-9269-4f83384101c4 \
+#     --instance-id i-02de0a6beb7e3dfca
+# (SSM keeps command history for 30 days), or to run again.
+
+===== Open after this session =====
+- Task 8.3 (benchmark with metrics) and 8.4 (`make down-app`): the app stack is still
+  there; the lab stopped its instances when the session ended.
+- Task 8.2's follower-node 5xx count (D1) not read.
+- D2 against ADR-0026 (above): the author decides on a superseding ADR.
+- The burn-rate alerts fire on a handful of errors at almost no traffic (S5): a
+  minimum-traffic guard is a design change (ADR-0029), for the author to decide.

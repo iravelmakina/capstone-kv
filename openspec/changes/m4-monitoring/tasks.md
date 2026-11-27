@@ -53,12 +53,12 @@
 ## 7. Infrastructure
 
 - [x] 7.1 `infra/app.yaml`: `Monitoring` parameter, monitor instance and security group (no public ingress; Loki from the VPC groups); coordinator and shard groups admit the monitor on metrics ports only; `cfn-lint` passes
-- [ ] 7.2 Alloy image delivered to private nodes through the artifacts bucket; node boot starts it
-- [ ] 7.3 Secrets `velmakina-kv/api-keys`, `velmakina-kv/ops-key` (ops and probe keys) and `velmakina-kv/monitoring` (Telegram bot, chat ID, Grafana admin password) created by the author; the pipeline passes no secret values
+- [x] 7.2 Alloy image delivered to private nodes through the artifacts bucket; node boot starts it
+- [x] 7.3 Secrets `velmakina-kv/api-keys`, `velmakina-kv/ops-key` (ops and probe keys) and `velmakina-kv/monitoring` (Telegram bot, chat ID, Grafana admin password) created by the author; the pipeline passes no secret values
 
 ## 8. AWS session
 
-- [ ] 8.1 Deploy with monitoring (author approves each write call); dashboard shows all panels through SSM port forwarding; smoke tests pass with keys
+- [x] 8.1 Deploy with monitoring (author approves each write call); dashboard shows all panels through SSM port forwarding; smoke tests pass with keys
 - [ ] 8.2 Drills: a follower node stopped (alert time and 5xx counted), a leader node stopped (promotion on the dashboard, alerts, 5xx and read latency during the 15 s window), the coordinator container stopped (probe alert); `docs/m4/evidence/aws-deploy.txt`; ADR-0026 superseded if the drills contradict it
 - [ ] 8.3 Workload A with metrics on, 3 runs, compared with the M3 control: instrumentation cost
 - [ ] 8.4 Evidence exported through SSM port forwarding; `make down-app`
