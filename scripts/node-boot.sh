@@ -92,7 +92,8 @@ if [ "$MONITOR_IP" != none ]; then
   fi
   mkdir -p /opt/kvlogs
   aws s3 cp "s3://$BUCKET/releases/$VERSION/monitoring.tar.gz" /tmp/monitoring.tar.gz --region "$REGION"
-  tar -xzf /tmp/monitoring.tar.gz -C /opt/kvlogs alloy.alloy
+  # `make release` packs monitoring/ with `-C monitoring .`, so members start with ./
+  tar -xzf /tmp/monitoring.tar.gz -C /opt/kvlogs ./alloy.alloy
   docker run -d --name alloy --restart always --user 0 --hostname "$(hostname -s)" \
     -e LOKI_URL="http://$MONITOR_IP:3100" \
     -v /opt/kvlogs/alloy.alloy:/etc/alloy/config.alloy:ro -v /var/run/docker.sock:/var/run/docker.sock:ro \
