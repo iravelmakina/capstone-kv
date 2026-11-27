@@ -109,13 +109,13 @@ tests:
               summary: "Follower 1c of shard-1 is behind"
               description: "More than 10 s since it last held the leader's last record (runbook: ReplicationLagHigh)."
 
-  # 10% of requests fail: the fast burn pages.
+  # 20% of requests fail at ~6.7 requests/s (as in the D2 drill): the fast burn pages.
   - interval: 15s
     input_series:
       - series: 'kv_requests_total{op="write",code="200",shard="shard-1",principal="ops"}'
-        values: "0+90x40"
+        values: "0+80x40"
       - series: 'kv_requests_total{op="write",code="503",shard="shard-1",principal="ops"}'
-        values: "0+10x40"
+        values: "0+20x40"
     alert_rule_test:
       - eval_time: 6m
         alertname: ErrorBudgetFastBurn
@@ -123,7 +123,55 @@ tests:
           - exp_labels: { severity: critical }
             exp_annotations:
               summary: Error budget burning fast
-              description: "Over 5% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
+              description: "Over 10% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
+
+  # 8% fail: above the old 5% threshold, below ADR-0030's 10%: no page; but the hour's 1%
+  # budget is spent.
+  - interval: 15s
+    input_series:
+      - series: 'kv_requests_total{op="write",code="200",shard="shard-1",principal="ops"}'
+        values: "0+92x40"
+      - series: 'kv_requests_total{op="write",code="503",shard="shard-1",principal="ops"}'
+        values: "0+8x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ErrorBudgetSpent
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: The hour's error budget is spent
+              description: "Over 1% of requests failed in the last hour; the SLO is 99% (runbook: ErrorBudgetSpent)."
+
+  # 0.5% fail: within the 1% budget (the old 0.5% threshold isn't crossed either).
+  - interval: 15s
+    input_series:
+      - series: 'kv_requests_total{op="read",code="200",shard="shard-1",principal="ops"}'
+        values: "0+199x40"
+      - series: 'kv_requests_total{op="read",code="503",shard="shard-1",principal="ops"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ErrorBudgetSpent
+        exp_alerts: []
+
+  # Almost idle (as after the deploy, S5): only the probe, 0.2 requests/s, a third failing.
+  # Neither budget alert fires (ADR-0030).
+  - interval: 15s
+    input_series:
+      - series: 'kv_requests_total{op="read",code="200",shard="shard-1",principal="probe"}'
+        values: "0+2x40"
+      - series: 'kv_requests_total{op="read",code="503",shard="shard-1",principal="probe"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ErrorBudgetSpent
+        exp_alerts: []
 
   # The watchdog always fires.
   - interval: 5s

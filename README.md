@@ -51,7 +51,7 @@ client ──HTTP──▶ coordinator ──▶ shard-1:  1a leader        1b  
 
 | Item | Where |
 | --- | --- |
-| M4 decisions | [ADR-0025](docs/adr/0025-metrics-and-slis.md) metrics and SLIs, [0026](docs/adr/0026-slo-values.md) SLO values, [0027](docs/adr/0027-mcp-boundaries-and-auth.md) MCP boundaries and authorisation, [0028](docs/adr/0028-record-versions-and-lww.md) record versions and last-write-wins, [0029](docs/adr/0029-monitoring-stack-and-logs.md) monitoring stack and logs |
+| M4 decisions | [ADR-0025](docs/adr/0025-metrics-and-slis.md) metrics and SLIs, [0026](docs/adr/0026-slo-values.md) SLO values, [0027](docs/adr/0027-mcp-boundaries-and-auth.md) MCP boundaries and authorisation, [0028](docs/adr/0028-record-versions-and-lww.md) record versions and last-write-wins, [0029](docs/adr/0029-monitoring-stack-and-logs.md) monitoring stack and logs; after the AWS drills: [0030](docs/adr/0030-availability-slo-after-drills.md) availability SLO |
 | M3 decisions | [ADR-0020](docs/adr/0020-replication-model-and-placement.md) replication model, placement and leader changes, [0021](docs/adr/0021-n-w-r-values.md) N / W / R, [0022](docs/adr/0022-log-structure-and-ordering.md) log structure and ordering, [0023](docs/adr/0023-replica-sync.md) replica sync and rejoin |
 | M2 decisions | [ADR-0009](docs/adr/0009-runtime-and-delivery.md) runtime and delivery, [0010](docs/adr/0010-api-protocol.md) API, [0011](docs/adr/0011-hash-and-virtual-nodes.md) hash and virtual nodes, [0012](docs/adr/0012-partition-key-strategy.md) partition key, [0013](docs/adr/0013-shard-storage-and-membership.md) storage and membership, [0014](docs/adr/0014-app-infrastructure.md) app infrastructure, [0015](docs/adr/0015-ci-cd-pipeline.md) CI/CD, [0016](docs/adr/0016-benchmark.md) benchmark; after the AI review: [0017](docs/adr/0017-pinned-ami.md) pinned AMI, [0018](docs/adr/0018-log-damage-and-failed-writes.md) damaged logs and failed writes |
 | Code | [`cmd/kvnode`](cmd/kvnode/main.go), [`internal/`](internal/) (`ring`, `store`, `shard` with [`replica.go`](internal/shard/replica.go), `coordinator` with [`membership.go`](internal/coordinator/membership.go), `metrics`, `auth`), [`cmd/kvmcp`](cmd/kvmcp/) (MCP server, its own module), [`bench/`](bench/) (go-ycsb binding) |
@@ -196,7 +196,7 @@ The scenarios each check must satisfy are in the
 
 - **Metrics:** `/metrics` on its own port (coordinator 9180, replicas 9181/9182) on every
   process; SLIs are availability and p99 per shard at the coordinator, plus a probe from
-  the monitor (ADR-0025); SLOs 99.5% per hour, read p99 15 ms, write p99 60 ms (ADR-0026).
+  the monitor (ADR-0025); SLOs 99% per hour (ADR-0030), read p99 15 ms, write p99 60 ms (ADR-0026).
 - **Logs:** JSON lines with the request ID, the key's name, and the LSN of each write.
 - **Monitoring:** `monitoring/` (Prometheus, alerts with tests, Alertmanager to Telegram,
   Loki, Alloy, Grafana), in docker compose and on an optional monitor instance (ADR-0029).

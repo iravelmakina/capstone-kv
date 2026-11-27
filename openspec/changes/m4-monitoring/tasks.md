@@ -59,7 +59,7 @@
 ## 8. AWS session
 
 - [x] 8.1 Deploy with monitoring (author approves each write call); dashboard shows all panels through SSM port forwarding; smoke tests pass with keys
-- [ ] 8.2 Drills: a follower node stopped (alert time and 5xx counted), a leader node stopped (promotion on the dashboard, alerts, 5xx and read latency during the 15 s window), the coordinator container stopped (probe alert); `docs/m4/evidence/aws-deploy.txt`; ADR-0026 superseded if the drills contradict it
+- [x] 8.2 Drills: a follower node stopped (alert time and 5xx counted), a leader node stopped (promotion on the dashboard, alerts, 5xx and read latency during the 15 s window), the coordinator container stopped (probe alert); `docs/m4/evidence/aws-deploy.txt`; ADR-0026 superseded if the drills contradict it
 - [x] 8.3 Workload A with metrics on, 3 runs, compared with the M3 control: instrumentation cost
 - [x] 8.4 Evidence exported through SSM port forwarding; `make down-app`
 

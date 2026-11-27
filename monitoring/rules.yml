@@ -1,5 +1,5 @@
 # Recording rules for the SLIs and alert rules for capstone-kv (ADR-0025, ADR-0026,
-# ADR-0029). Thresholds are the SLOs: availability 99.5% per hour, read p99 15 ms and
+# ADR-0029, ADR-0030). Thresholds are the SLOs: availability 99% per hour, read p99 15 ms and
 # write p99 60 ms per shard over 5 minutes. Tested by rules_test.yml (promtool).
 groups:
   - name: sli
@@ -115,21 +115,27 @@ groups:
           summary: "{{ $labels.shard }} answers writes with 504"
           description: "Writes reach the leader but no follower confirms them in 2 s (runbook: WritesNotCommitted)."
 
-      # Burn rate: at 5% errors the hour's 0.5% budget goes in about 6 minutes. Both
-      # windows must agree, so a short spike that is already over doesn't page.
+      # Burn rate: at 10% errors the hour's 1% budget goes in about 6 minutes (ADR-0030).
+      # Both windows must agree, so a short spike that is already over doesn't page. Both
+      # budget alerts need >= 1 request/s: at idle a few failed probes are a large share
+      # of almost nothing, and the cause alerts above cover a broken store.
       - alert: ErrorBudgetFastBurn
-        expr: kv:errors:ratio_rate5m > 0.05 and kv:errors:ratio_rate1m > 0.05
+        expr: |
+          kv:errors:ratio_rate5m > 0.10 and kv:errors:ratio_rate1m > 0.10
+          and on() sum(rate(kv_requests_total[5m])) >= 1
         labels: { severity: critical }
         annotations:
           summary: Error budget burning fast
-          description: "Over 5% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
+          description: "Over 10% of requests fail, over both 5 min and 1 min (runbook: ErrorBudgetFastBurn)."
 
       - alert: ErrorBudgetSpent
-        expr: kv:errors:ratio_rate1h > 0.005
+        expr: |
+          kv:errors:ratio_rate1h > 0.01
+          and on() sum(rate(kv_requests_total[5m])) >= 1
         labels: { severity: warning }
         annotations:
           summary: The hour's error budget is spent
-          description: "Over 0.5% of requests failed in the last hour; the SLO is 99.5% (runbook: ErrorBudgetSpent)."
+          description: "Over 1% of requests failed in the last hour; the SLO is 99% (runbook: ErrorBudgetSpent)."
 
       # Always firing: its hourly message in Telegram says the monitor itself is alive.
       - alert: Watchdog

@@ -108,13 +108,14 @@ a newer write (ADR-0028).
 
 ## ErrorBudgetFastBurn (critical) / ErrorBudgetSpent (warning)
 
-**Means:** more than 5% of requests fail (5xx) over both 5 minutes and 1 minute: at that
-rate the hour's 0.5% budget is gone in about 6 minutes. "Spent": over 0.5% failed in the
-last hour.
+**Means:** more than 10% of requests fail (5xx) over both 5 minutes and 1 minute: at that
+rate the hour's 1% budget is gone in about 6 minutes. "Spent": over 1% failed in the last
+hour. Both fire only at ≥ 1 request/s; at idle, look at the cause alerts.
 **Check:** "Errors by status": 503 (no leader, too few replicas) or 504 (commits timing
 out)? Then the matching alert above.
-**Do:** as for that alert. A planned stop of a leader costs about 0.14% of an hour's
-requests (ADR-0026); more than three in an hour breaks the SLO.
+**Do:** as for that alert. Losing a node that holds both leaders cost ≈ 0.93% of an hour
+of workload A in the AWS drill (ADR-0030): one per hour fits the SLO, a second breaks it.
+Check `kv_shard_leader_epoch`: if both leaders sit on one node, that node is the risk.
 
 ## Watchdog (info)
 

@@ -26,7 +26,7 @@
       "id": 1,
       "type": "stat",
       "title": "Availability, probe (5 min)",
-      "description": "Share of successful probes from the monitor: an outside view that still works when the coordinator is down. SLO 99.5% per hour.",
+      "description": "Share of successful probes from the monitor: an outside view that still works when the coordinator is down. SLO 99% per hour.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -61,7 +61,7 @@
               },
               {
                 "color": "green",
-                "value": 0.995
+                "value": 0.99
               }
             ]
           }
@@ -74,7 +74,7 @@
       "id": 2,
       "type": "stat",
       "title": "Availability, coordinator (5 min)",
-      "description": "Requests answered below 500 over all requests, as the coordinator counts them. SLO 99.5% per hour.",
+      "description": "Requests answered below 500 over all requests, as the coordinator counts them. SLO 99% per hour.",
       "gridPos": {
         "x": 6,
         "y": 0,
@@ -109,7 +109,7 @@
               },
               {
                 "color": "green",
-                "value": 0.995
+                "value": 0.99
               }
             ]
           }
