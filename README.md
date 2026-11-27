@@ -102,9 +102,12 @@ to Telegram when `secrets/telegram/telegram_token` and `telegram_chat_id` exist 
 MCP server, for Claude Code (or any MCP client) against the local cluster:
 
 ```bash
-(cd cmd/kvmcp && go build -o ../../kvmcp .)
-claude mcp add --env KV_URL=http://localhost:8080 --env KV_API_KEY=$(cat secrets/mcp.key) capstone-kv -- "$PWD/kvmcp"
+claude mcp add capstone-kv -- "$PWD/scripts/kvmcp-local.sh"
 ```
+
+The script builds `kvmcp` if needed and reads the key from `secrets/mcp.key` at start, so
+the key never lands in Claude Code's configuration; `KV_KEY_FILE=secrets/mcp-delete.key`
+gives the agent delete too. A session with it: [`docs/m4/evidence/mcp-demo.md`](docs/m4/evidence/mcp-demo.md).
 
 Replication by hand (replica health on `127.0.0.1:8111-8113` for shard-1, `8121-8123` for
 shard-2):
