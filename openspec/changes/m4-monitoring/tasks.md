@@ -66,8 +66,8 @@
 ## 9. Review and docs
 
 - [x] 9.1 `docs/m4/runbook.md`: for each alert, what it means, what to check, what to do; also what to do when the monitor itself is silent
-- [ ] 9.2 `docs/m4/control-questions.md` (author's notes)
-- [ ] 9.3 README: monitoring, keys, MCP; what changed since M3
+- [x] 9.2 `docs/m4/control-questions.md` (author's notes)
+- [x] 9.3 README: monitoring, keys, MCP; what changed since M3
 - [ ] 9.4 `docs/m4/cost.md`
 - [ ] 9.5 `AGENT_WORKLOG.md` has a row for every agent-made file
 - [ ] 9.6 After M2 and M3 are archived: MODIFIED deltas for `kv-api` and `replication`, so the archived specs don't contradict M4

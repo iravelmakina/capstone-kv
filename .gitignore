@@ -25,3 +25,6 @@ node_modules/
 # Benchmark outputs downloaded by make bench-aws (summaries go into docs/m2/benchmark.md)
 bench-results/
 .kvbench-linux
+
+# the MCP server binary built for the local demo
+/kvmcp
