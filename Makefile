@@ -34,6 +34,7 @@ whoami:          ## which AWS identity is active
 
 lint:            ## static checks on all templates (no AWS calls)
 	$(CFNLINT) infra/*.yaml
+	python3 scripts/check-sg-descriptions.py infra/*.yaml   # EC2's charset; cfn-lint doesn't check it
 
 # diff: create a change set WITHOUT executing it and print what it would do.
 # CREATE if the stack doesn't exist (or only ever had an unexecuted change set), else UPDATE.

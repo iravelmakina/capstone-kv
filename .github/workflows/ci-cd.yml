@@ -72,7 +72,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: cfn-lint
-        run: pip install --quiet cfn-lint && cfn-lint infra/*.yaml
+        run: pip install --quiet cfn-lint && cfn-lint infra/*.yaml && python3 scripts/check-sg-descriptions.py infra/*.yaml
 
   # Everything below runs only for pushes to main (and manual runs on main).
   build:

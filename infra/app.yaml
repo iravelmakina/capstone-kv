@@ -188,7 +188,7 @@ Resources:
     Condition: WithMonitoring
     Properties:
       GroupId: !Ref ShardSecurityGroup
-      Description: replicas' metrics ports (shard-1 9181, shard-2 9182), scraped by the monitor
+      Description: replica metrics ports (shard-1 9181, shard-2 9182), scraped by the monitor
       IpProtocol: tcp
       FromPort: 9181
       ToPort: 9182
