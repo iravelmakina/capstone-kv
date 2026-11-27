@@ -319,7 +319,10 @@ prometheus:      ## Prometheus of the AWS monitor on http://localhost:9090 (SSM 
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,
 # runs bench.sh on the client through SSM and waits (polling: a full run takes ~40 min,
-# longer than the CLI's built-in waiter). The client can't write to S3 (instance role, M1
+# longer than the CLI's built-in waiter). The poll stops after 250 × 30 s (past the 2 h
+# executionTimeout) or after 10 failed calls in a row: an M4 lab session ended mid-run and
+# the old loop, which read every error as Pending, polled for 3 hours (docs/m4/evidence/
+# aws-deploy.txt). The client can't write to S3 (instance role, M1
 # evidence 63), so the summaries come back in the SSM output; this target saves them to
 # bench-results/<sha>/<time>.txt and uploads that file to S3 with its own credentials.
 RUNS ?= 3
@@ -344,8 +347,11 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS) '$(strip $(WORKLOADS))'\"]" \
 	  --query Command.CommandId --output text); \
 	echo "SSM command $$cmd started $$(date -u +%T) UTC; polling every 30 s"; \
-	while :; do \
-	  status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null || echo Pending); \
+	errs=0; \
+	for i in $$(seq 250); do \
+	  if status=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$client --query Status --output text 2>/dev/null); then errs=0; \
+	  else errs=$$((errs+1)); status=Pending; \
+	    [ $$errs -lt 10 ] || { echo "get-command-invocation failed 10 times in a row (lab credentials expired?): fetch $$cmd later" >&2; exit 1; }; fi; \
 	  case $$status in Pending|InProgress|Delayed) sleep 30;; *) break;; esac; \
 	done; \
 	result=bench-results/$(VERSION)/$$(date -u +%Y%m%dT%H%M%SZ)$(if $(LABEL),-$(LABEL)).txt; mkdir -p bench-results/$(VERSION); \
