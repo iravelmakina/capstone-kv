@@ -19,7 +19,7 @@ last-write-wins, and opens the store to AI agents through an MCP server with cle
   replica, errors, replication lag measured on the leader, commit wait, leader and epoch,
   keys per shard, Go runtime. Availability and p99 per shard at the coordinator, plus an
   outside probe, are the SLIs.
-- **SLOs:** availability ≥ 99.5% per hour and p99 ≤ 15 ms for reads, ≤ 60 ms for writes
+- **SLOs:** availability ≥ 99% per hour (ADR-0030) and p99 ≤ 15 ms for reads, ≤ 60 ms for writes
   per shard, measured at the coordinator.
 - **Logs:** JSON logs with a request ID that the coordinator assigns and passes to the
   replicas, and the key's name as `principal`; the leader logs the LSN it gave the request,

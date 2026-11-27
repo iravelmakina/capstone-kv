@@ -38,7 +38,7 @@ and the seconds since that follower last caught up.
 The SLIs SHALL be availability (the share of public requests answered with a status below
 500, at the coordinator, and the share of successful probes from the monitor) and p99
 latency of reads and of writes per shard at the coordinator. The SLOs SHALL be
-availability ≥ 99.5% per hour of operation, read p99 ≤ 15 ms and write p99 ≤ 60 ms over 5
+availability ≥ 99% per hour of operation, read p99 ≤ 15 ms and write p99 ≤ 60 ms over 5
 minutes, per shard.
 
 #### Scenario: SLO on the dashboard
@@ -83,8 +83,13 @@ SHALL be repeated there every hour.
 Alerts SHALL fire for: the coordinator down (probe or scrape), a node down, a replica down,
 a shard without a leader, metrics missing, a shard's read or write p99 above its SLO at ≥ 1
 request per second, replication lag above 10 seconds, a sustained 504 rate, a fast
-error-budget burn (5xx above 5% over both 5 minutes and 1 minute), and the hourly budget
-spent.
+error-budget burn (5xx above 10% over both 5 minutes and 1 minute), and the hourly budget
+spent (5xx above 1%). The two budget alerts SHALL fire only while the store gets at least 1
+request per second over 5 minutes.
+
+#### Scenario: No budget page at idle
+- **WHEN** the store gets almost no traffic and a few probes fail
+- **THEN** neither `ErrorBudgetFastBurn` nor `ErrorBudgetSpent` fires
 
 #### Scenario: Node down alerted
 - **WHEN** a shard node that runs no leader is stopped

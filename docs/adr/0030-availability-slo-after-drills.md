@@ -1,7 +1,8 @@
 # ADR-0030: The availability SLO after the AWS drills
 
-- Status: **Proposed**. Drafted with Claude Code on 2026-11-27 at the author's request
-  ("Yes, draft it") from the M4 lab drills; not accepted yet.
+- Status: **Accepted** — 2026-11-27 by Iryna Velmakina (author) in chat ("Accept it"),
+  options B and a. Drafted with Claude Code at her request ("Yes, draft it") from the M4
+  lab drills.
 - Date: 2026-11-27
 - Supersedes in part ADR-0026: the availability value and the arithmetic behind it ("fits
   about three leader changes per hour"), and its worry about reads during a node stop.
@@ -50,7 +51,7 @@ almost all there is, and four failures out of a few dozen are over 5%.
 | Work | runbook and ADR text | thresholds in rules, dashboard, spec, runbook | Go code in the coordinator (promotion and a rebalance at start), tests, a drill |
 | Hides a real problem? | no | a little: 36 s of a full outage per hour pass | no |
 
-**Option B (proposed).**
+**Option B.**
 
 - **Availability ≥ 99%** of public requests answered below 500 and of probes, per hour of
   operation. The SLI itself (ADR-0025) is unchanged.
@@ -79,7 +80,7 @@ back.
 | A dead store at idle | CoordinatorDown (probe), ShardWithoutLeader, NodeDown still fire | pages | pages |
 | Same as the latency alerts | yes (they already require ≥ 1 req/s) | — | — |
 
-**Option a (proposed).** `ErrorBudgetFastBurn` and `ErrorBudgetSpent` fire only while the
+**Option a.** `ErrorBudgetFastBurn` and `ErrorBudgetSpent` fire only while the
 store gets at least 1 request/s over 5 minutes. When there is no traffic, the per-cause
 alerts cover a broken store, and they don't depend on how many requests there are.
 

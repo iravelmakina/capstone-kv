@@ -3,6 +3,8 @@
 - Status: **Accepted** — 2026-11-27 by Iryna Velmakina (author) in chat ("я все приймаю"),
   together with the AI-review verdicts. Drafted with Claude Code from the decision list she
   approved; revised after the AI design review (`docs/m4/ai-review.md`).
+- Superseded in part by ADR-0030: availability is 99% per hour (the drills showed a leader
+  node's loss costs more than "three per hour" allowed); budget alerts need ≥ 1 request/s.
 - Date: 2026-11-27
 
 ## Context

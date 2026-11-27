@@ -37,8 +37,9 @@ autoscaling and rebalancing (M5).
 1. **Metrics:** Prometheus text format written with the standard library (ADR-0009), on a
    separate metrics port; SLIs are availability and p99 at the coordinator, per shard, plus
    an outside probe. ADR-0025.
-2. **SLOs:** availability ≥ 99.5% per hour of operation; read p99 ≤ 15 ms, write p99 ≤
-   60 ms over 5 minutes, per shard. ADR-0026.
+2. **SLOs:** availability ≥ 99% per hour of operation; read p99 ≤ 15 ms, write p99 ≤
+   60 ms over 5 minutes, per shard. ADR-0026, availability superseded by ADR-0030 after
+   the AWS drills.
 3. **MCP:** a Go binary on the official SDK, stdio; read, exists, create-only, conditional
    update and delete; the store enforces the limits through API keys with scopes. ADR-0027.
 4. **Versions:** an HLC stamp per record, issued by the leader and returned on every write
@@ -95,8 +96,8 @@ Prometheus scrapes and evaluates rules every 5 s. Alertmanager: `group_wait` 5 s
 | `ReadLatencyHigh` / `WriteLatencyHigh` | p99 of a shard above 15 / 60 ms, at ≥ 1 request/s | 5 min | warning |
 | `ReplicationLagHigh` | `kv_follower_lag_seconds > 10` | 30 s | warning |
 | `WritesNotCommitted` | 504 rate above 0.1/s | 1 min | warning |
-| `ErrorBudgetFastBurn` | 5xx above 5% over 5 min **and** over 1 min | — | critical |
-| `ErrorBudgetSpent` | 5xx above 0.5% over 1 h | — | warning |
+| `ErrorBudgetFastBurn` | 5xx above 10% over 5 min **and** over 1 min, at ≥ 1 request/s (ADR-0030) | — | critical |
+| `ErrorBudgetSpent` | 5xx above 1% over 1 h, at ≥ 1 request/s (ADR-0030) | — | warning |
 | `Watchdog` | always firing; repeated hourly to Telegram | — | info |
 
 `Watchdog` is the monitor's own heartbeat: an hour without it means the monitor is down.
