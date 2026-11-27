@@ -73,18 +73,26 @@ echo "monitor-boot: coordinator $COORD, nodes $NODES"
 # 4. The containers, on one network so they find each other by name.
 docker network inspect kvmon >/dev/null 2>&1 || docker network create kvmon
 for c in prometheus alertmanager blackbox loki grafana; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+# Prometheus' and Loki's data on the instance's disk, owned by the users the images run as
+# (nobody 65534, loki 10001). The containers are recreated on every boot, and the lab stops
+# and starts the instances between sessions: without these, Prometheus got a new anonymous
+# volume each time and Loki kept its data inside the container, so both came back empty
+# (M4 lab session 2, docs/m4/evidence/aws-deploy.txt R1). They still go with the stack.
+mkdir -p "$ROOT/data/prometheus" "$ROOT/data/loki"
+chown 65534:65534 "$ROOT/data/prometheus"
+chown 10001:10001 "$ROOT/data/loki"
 M=$ROOT/monitoring
 run() { docker run -d --restart always --network kvmon --name "$@"; }
 run prometheus -p 127.0.0.1:9090:9090 \
   -v "$M/prometheus.yml:/etc/prometheus/prometheus.yml:ro" -v "$M/rules.yml:/etc/prometheus/rules.yml:ro" \
-  -v "$ROOT/targets:/etc/prometheus/targets:ro" \
+  -v "$ROOT/targets:/etc/prometheus/targets:ro" -v "$ROOT/data/prometheus:/prometheus" \
   prom/prometheus:v3.1.0 --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.retention.time=24h
 run alertmanager -p 127.0.0.1:9093:9093 --entrypoint /bin/sh \
   -v "$M/alertmanager/start.sh:/start.sh:ro" -v "$ROOT/secrets/telegram:/secrets:ro" \
   prom/alertmanager:v0.28.0 /start.sh
 run blackbox -v "$M/blackbox.yml:/etc/blackbox/blackbox.yml:ro" -v "$ROOT/secrets/probe.key:/etc/blackbox/probe.key:ro" \
   prom/blackbox-exporter:v0.25.0 --config.file=/etc/blackbox/blackbox.yml
-run loki -p 3100:3100 -v "$M/loki.yml:/etc/loki/loki.yml:ro" grafana/loki:3.3.2 -config.file=/etc/loki/loki.yml
+run loki -p 3100:3100 -v "$M/loki.yml:/etc/loki/loki.yml:ro" -v "$ROOT/data/loki:/loki" grafana/loki:3.3.2 -config.file=/etc/loki/loki.yml
 run grafana -p 127.0.0.1:3000:3000 \
   -e GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_password -e GF_AUTH_ANONYMOUS_ENABLED=false \
   -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/capstone-kv.json \
