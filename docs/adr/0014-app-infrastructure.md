@@ -3,6 +3,8 @@
 - Status: **Accepted** — 2026-11-24 by Iryna Velmakina (author). Drafted with Claude Code from the decision list agreed in chat.
 - Date: 2026-11-24
 - Superseded in part by ADR-0020: 2 shards in two AZs (now 3 shard instances in three AZs, each running one replica of each shard).
+- Superseded in part by ADR-0035: the coordinator is a t3.medium, and the extra replica
+  set runs in Auto Scaling groups (nodes a/b/c stay instances).
 
 ## Context
 

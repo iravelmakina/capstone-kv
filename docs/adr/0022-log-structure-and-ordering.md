@@ -6,6 +6,7 @@
 - Supersedes: ADR-0013's log record format (records now carry a format version, epoch, LSN
   and hash). Settles ADR-0018's deferrals: the header checksum and re-sync of a damaged
   replica are done here; group commit moves to M5 (below). The rest of both ADRs stands.
+- Superseded in part by ADR-0033: record format 3 adds freeze and purge records.
 
 ## Context
 

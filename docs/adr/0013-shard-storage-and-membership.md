@@ -4,6 +4,8 @@
 - Date: 2026-11-24
 - Superseded in part by ADR-0020: a silent shard's keys return 503 (now per replica set).
 - Superseded in part by ADR-0022: the log record format (records get an LSN).
+- Superseded in part by ADR-0033: a registering shard is no longer added to the ring at
+  once; it waits as *pending* until a migration adds it.
 
 ## Context
 

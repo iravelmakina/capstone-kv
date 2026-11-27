@@ -6,6 +6,7 @@
 - Date: 2026-11-27
 - Supersedes in part ADR-0025: the list of histogram buckets. The metrics, the SLIs and
   the choice of fixed buckets written by our own code stay.
+- Superseded in part by ADR-0032: a 12 ms bucket edge (19 edges).
 
 ## Context
 
