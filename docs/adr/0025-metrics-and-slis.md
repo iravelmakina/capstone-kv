@@ -3,6 +3,8 @@
 - Status: **Accepted** — 2026-11-27 by Iryna Velmakina (author) in chat ("я все приймаю"),
   together with the AI-review verdicts. Drafted with Claude Code from the decision list she
   approved; revised after the AI design review (`docs/m4/ai-review.md`).
+- Superseded in part by ADR-0031: the histogram buckets (18 edges, adding 6, 10, 20, 40
+  and 50 ms; the SLO edges stay).
 - Date: 2026-11-27
 
 ## Context

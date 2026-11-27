@@ -1,7 +1,8 @@
 # ADR-0031: Finer latency histogram buckets
 
-- Status: **Proposed**. Drafted with Claude Code on 2026-11-27 at the author's request
-  ("Yes, draft it"), from the M4 benchmark in AWS; not accepted yet.
+- Status: **Accepted** — 2026-11-27 by Iryna Velmakina (author) in chat ("Accept it"),
+  option B. Drafted with Claude Code at her request ("Yes, draft it") from the M4
+  benchmark in AWS.
 - Date: 2026-11-27
 - Supersedes in part ADR-0025: the list of histogram buckets. The metrics, the SLIs and
   the choice of fixed buckets written by our own code stay.
@@ -44,7 +45,7 @@ exactly where the current buckets interpolate the most.
 | Work | one line, tests | **one line, tests** | protobuf exposition: our text-format code (ADR-0025) can't write native histograms; needs `client_golang` or our own protobuf | none |
 | Series added (coordinator: ~10 op × shard pairs) | +20 | **+50** | — | 0 |
 
-**Option B (proposed).** `LatencyBuckets` becomes 0.001, 0.002, 0.004, 0.006, 0.008,
+**Option B.** `LatencyBuckets` becomes 0.001, 0.002, 0.004, 0.006, 0.008,
 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06, 0.12, 0.25, 0.5, 1, 2, 5 seconds. That's
 18 edges, at most 2 ms apart up to 10 ms, 5 ms up to 20 ms and 10 ms up to 60 ms. Both SLO
 edges stay. It covers the read range as well as the write range, because M5 will set
