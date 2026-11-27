@@ -197,9 +197,12 @@ SSM command bcf93a7a-a4a4-460c-9269-4f83384101c4 started 15:17:10 UTC; polling e
 #   aws ssm get-command-invocation --command-id bcf93a7a-a4a4-460c-9269-4f83384101c4 \
 #     --instance-id i-02de0a6beb7e3dfca
 # (SSM keeps command history for 30 days), or to run again.
-# Read in session 2: the command never ran. The lab had stopped the client before its
-# agent picked the command up; the agent got it at 18:18, when the lab started the
-# instances again, and it failed (list-commands: TimedOut, the 10-minute delivery timeout).
+# Read in session 2: the command never ran. CloudTrail: the lab stopped all 6 instances at
+# 15:42 (StopInstances by the lab's own account) and started them at 18:18. In the 25
+# minutes between the session's end (~15:17) and the stop, the client's agent didn't pick
+# the command up, most likely because the session's end denies the instances' role too
+# (not checked). It got it at 18:18 and failed (list-commands: TimedOut, the 10-minute
+# delivery timeout).
 # Rerun in session 2, below.
 
 #############################################################################################
