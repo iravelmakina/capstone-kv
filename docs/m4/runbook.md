@@ -135,3 +135,20 @@ by themselves. Until it is back, watch the store by hand: `/health` on the coord
    time; the leader's line names the LSN and commit wait.
 4. Followers by LSN: `{container=~".+"} | json | msg="appended"` and find the range that
    holds that LSN.
+
+## Checking a release in a lab session
+
+What was fixed after the M4 lab sessions (smoke-replica under load, monitor data across a
+restart, ADR-0030's alert rules, ADR-0031's buckets, `make grafana-check`) is checked in
+AWS by `scripts/m4-lab-check.sh`, about an hour in all:
+
+1. Start the lab; put its credentials in `~/.aws/credentials` as profile `academy`, adding
+   the header when the copied text has none:
+   `{ pbpaste | grep -q '^\[' || echo '[academy]'; pbpaste | sed 's/^\[default\]/[academy]/'; } > ~/.aws/credentials && chmod 600 ~/.aws/credentials`
+2. `make release` (Docker running; builds and uploads the current commit).
+3. `CONFIRM=yes make up-app MONITORING=true BENCH=true` (~5 minutes).
+4. `bash scripts/m4-lab-check.sh` (~45 minutes): smoke, `grafana-check`, the rules and
+   buckets Prometheus has, a follower node stopped under workload A, one clean benchmark
+   run with p99 compared to the client's, the monitor stopped and started. It prints
+   PASS / FAIL per check and saves everything to `bench-results/<version>/`.
+5. `make down-app`.
