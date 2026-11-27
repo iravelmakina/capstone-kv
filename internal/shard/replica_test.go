@@ -383,3 +383,20 @@ func TestFollowerLagOnLeader(t *testing.T) {
 		t.Errorf("role metric = %v", v)
 	}
 }
+
+// A coordinator that has just restarted may answer a heartbeat with the leader's name but
+// no address yet (the leader hasn't reported in). The follower must keep pulling from the
+// address it knows, and a changed address must wake its pull loop (found in the M4 drill:
+// after a coordinator restart every write got 504).
+func TestFollowerKeepsPullingAfterEmptyLeaderAddress(t *testing.T) {
+	a, b, c := threeNodes(t)
+	if code := put(t, a, "k0", `{"v":0}`); code != 200 {
+		t.Fatalf("put = %d", code)
+	}
+	b.r.SetRole(1, a.id, "") // the restarted coordinator's first answer
+	c.r.SetRole(1, a.id, "")
+	if code := put(t, a, "k1", `{"v":1}`); code != 200 {
+		t.Fatalf("put after an answer without the leader's address = %d, want 200", code)
+	}
+	eventually(t, "followers at the leader's LSN", func() bool { return lastLSN(b) == 2 && lastLSN(c) == 2 })
+}

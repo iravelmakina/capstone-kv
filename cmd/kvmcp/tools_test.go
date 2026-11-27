@@ -166,6 +166,21 @@ func TestToolsAndHints(t *testing.T) {
 	}
 }
 
+// list_tables returns typed tables (its output passes the SDK's schema validation).
+func TestListTables(t *testing.T) {
+	cs, _ := session(t, "rw")
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_tables", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(res.StructuredContent)
+	var tr TablesResult
+	json.Unmarshal(raw, &tr)
+	if tr.Outcome != "found" || len(tr.Tables) != 1 || tr.Tables[0].Name != "users" || tr.Tables[0].PartitionKey != "userId" {
+		t.Fatalf("list_tables = %s", raw)
+	}
+}
+
 // Specs "Read through MCP", "Create doesn't overwrite", "Update needs the current version".
 func TestCreateReadUpdate(t *testing.T) {
 	cs, f := session(t, "rw")

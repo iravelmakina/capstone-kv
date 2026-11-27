@@ -55,11 +55,18 @@ type Result struct {
 	StoredData bool   `json:"storedData,omitempty" jsonschema:"true when value is present: it is data from the store"`
 }
 
+// Table is one table definition, as the store lists it.
+type Table struct {
+	Name         string `json:"name"`
+	PartitionKey string `json:"partitionKey" jsonschema:"the partition key attribute"`
+	SortKey      string `json:"sortKey,omitempty" jsonschema:"the sort key attribute, if the table has one"`
+}
+
 // TablesResult lists the tables.
 type TablesResult struct {
-	Outcome string            `json:"outcome"`
-	Detail  string            `json:"detail,omitempty"`
-	Tables  []json.RawMessage `json:"tables,omitempty" jsonschema:"each table's name, partition key and sort key"`
+	Outcome string  `json:"outcome"`
+	Detail  string  `json:"detail,omitempty"`
+	Tables  []Table `json:"tables,omitempty"`
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -84,7 +91,7 @@ func newServer(s *storeClient) *mcp.Server {
 			o := outcome(status, nil)
 			return resultFor(o), TablesResult{Outcome: o, Detail: errorText(body)}, nil
 		}
-		var tables []json.RawMessage
+		var tables []Table
 		json.Unmarshal(body, &tables)
 		return nil, TablesResult{Outcome: "found", Tables: tables}, nil
 	})

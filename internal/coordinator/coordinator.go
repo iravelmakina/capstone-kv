@@ -263,9 +263,9 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, 
 	case http.StatusConflict: // leadership moved between our lookup and its answer
 		c.fail(w, id, http.StatusServiceUnavailable, "leader of "+id+" changed; retry")
 	case http.StatusGatewayTimeout:
-		c.fail(w, id, http.StatusGatewayTimeout, "shard "+id+": "+strings.TrimSpace(string(msg)))
+		c.fail(w, id, http.StatusGatewayTimeout, "shard "+id+": "+errorText(msg))
 	default:
-		httpx.WriteError(w, resp.StatusCode, "shard "+id+": "+strings.TrimSpace(string(msg)))
+		httpx.WriteError(w, resp.StatusCode, "shard "+id+": "+errorText(msg))
 	}
 }
 
@@ -373,6 +373,17 @@ func (c *Coordinator) ask(requestID, method, url string) *answer {
 func (c *Coordinator) fail(w http.ResponseWriter, shardID string, status int, msg string) {
 	c.members.count(shardID, status)
 	httpx.WriteError(w, status, msg)
+}
+
+// errorText is a replica's {"error": "..."} message, or its raw body.
+func errorText(body []byte) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return strings.TrimSpace(string(body))
 }
 
 // checkKeyValue enforces the key rules from api/openapi.yaml, plus "no zero bytes": the

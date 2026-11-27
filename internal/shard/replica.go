@@ -136,7 +136,13 @@ func (r *Replica) SetRole(epoch uint64, leaderID, leaderAddr string) {
 		return
 	}
 	if epoch == r.epoch && leaderID == r.leaderID {
-		r.leaderAddr = leaderAddr // the leader may have restarted on a new address
+		// Same leader. Take a new address (it may have restarted elsewhere) and wake the
+		// pull loop for it; ignore an empty one: a coordinator that has just restarted
+		// knows the leader's name before the leader has reported its address.
+		if leaderAddr != "" && leaderAddr != r.leaderAddr {
+			r.leaderAddr = leaderAddr
+			r.broadcastLocked()
+		}
 		return
 	}
 	wasLeader := r.isLeaderLocked()
