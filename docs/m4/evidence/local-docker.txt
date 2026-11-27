@@ -187,3 +187,15 @@ What the drills show against the design (ADR-0026/0029; heartbeat timeout 15 s):
   bug fixed in c1a6c44 does not come back).
 - one request followed: coordinator (principal, shard, key hash) -> leader (request ID ->
   LSN 123) -> both followers (appended range covering LSN 123).
+
+
+===== [T] alerts to Telegram (11:40 UTC, after the bot was made; token and chat ID in the git-ignored secrets/telegram/) =====
+`docker compose restart alertmanager`: start.sh found both files and configured the Telegram
+receiver (token through bot_token_file, never in the config). Counted by Alertmanager's own
+alertmanager_notifications_total{integration="telegram"} / _failed_total:
+11:41:07 sent=1 failed=0   Watchdog (Prometheus re-sends firing alerts once a minute after a restart)
+11:41:33 r1c stopped; Telegram notification sent 26 s after stop; sent=3 failed=0
+         (two messages: ReplicaDown and NodeDown, grouped by alertname, node, shard)
+11:42:03 r1c started; resolved notification sent 30 s after start; sent=5 failed=0
+         (resolved messages go out on the next group_interval, 30 s)
+The author saw the messages in the bot's chat.
