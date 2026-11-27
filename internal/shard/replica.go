@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,8 @@ const (
 	HeaderLSN        = "X-KV-LSN"         // a key's version (with epoch)
 	HeaderLast       = "X-KV-Last"        // the leader's last LSN, on log answers
 	HeaderTruncateTo = "X-KV-Truncate-To" // "cut your log back to this LSN" (ADR-0023 step 5)
+	HeaderStamp      = "X-KV-Timestamp"   // a record's HLC stamp (ADR-0028)
+	HeaderSuperseded = "X-KV-Superseded"  // "true": the write lost to a newer one
 )
 
 // errNotLeader: the replica asked for the log isn't the current leader.
@@ -231,12 +234,14 @@ func (r *Replica) read(w http.ResponseWriter, req *http.Request) {
 	if found {
 		w.Header().Set(HeaderEpoch, strconv.FormatUint(e.Version.Epoch, 10))
 		w.Header().Set(HeaderLSN, strconv.FormatUint(e.Version.LSN, 10))
+		w.Header().Set(HeaderStamp, strconv.FormatUint(e.Stamp, 10))
 	}
 	if !found || e.Deleted {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("ETag", etag(e.Stamp))
 	if req.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK) // EXISTS: status only, no body
 		return
@@ -244,8 +249,9 @@ func (r *Replica) read(w http.ResponseWriter, req *http.Request) {
 	w.Write(e.Value)
 }
 
-// write is the leader's write path (ADR-0023 step 3): append and flush, then wait until a
-// follower has it (W = 2), then make it visible and answer. A follower answers 409.
+// write is the leader's write path (ADR-0023 step 3, ADR-0028): check the version rules
+// and append under the store's lock, flush, wait until a follower has it (W = 2), then
+// make it visible and answer with the write's stamp. A follower answers 409.
 func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key string, value []byte, okStatus int) {
 	r.mu.Lock()
 	if !r.isLeaderLocked() {
@@ -257,9 +263,43 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 	epoch := r.epoch
 	r.mu.Unlock()
 
-	start := time.Now()
-	rec, err := r.st.Write(epoch, op, key, value)
+	opts, err := writeOpts(req)
 	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := uint64(time.Now().UnixMilli())
+	if opts.Stamp>>16 > now+maxStampAhead {
+		httpx.WriteError(w, http.StatusBadRequest, "X-KV-Timestamp is more than 5 s ahead of the leader's clock")
+		return
+	}
+
+	start := time.Now()
+	rec, head, err := r.st.WriteVersioned(epoch, op, key, value, opts, now)
+	reqID := req.Header.Get(httpx.HeaderRequestID)
+	switch {
+	case errors.Is(err, store.ErrPrecondition):
+		if head.LSN > 0 && !head.Deleted {
+			w.Header().Set("ETag", etag(head.Stamp))
+		}
+		httpx.WriteError(w, http.StatusPreconditionFailed, "the item's version doesn't match the request's condition")
+		return
+	case errors.Is(err, store.ErrSuperseded):
+		// Last-write-wins: a newer write to the key exists. Say so only once that newer
+		// record has committed, so the client is never told about a write that may be lost.
+		w.Header().Set(HeaderStamp, strconv.FormatUint(opts.Stamp, 10))
+		status := r.awaitCommit(req, epoch, head.LSN, start)
+		slog.Info("write superseded", "request_id", reqID, "op", opName(op), "epoch", epoch,
+			"stamp", opts.Stamp, "newer_lsn", head.LSN, "status", status)
+		switch status {
+		case 0:
+			w.Header().Set(HeaderSuperseded, "true")
+			w.WriteHeader(okStatus)
+		case http.StatusGatewayTimeout:
+			httpx.WriteError(w, http.StatusGatewayTimeout, "superseded by a write that hasn't committed; outcome unknown")
+		}
+		return
+	case err != nil:
 		httpx.WriteError(w, http.StatusInternalServerError, "write failed: "+err.Error())
 		return
 	}
@@ -271,50 +311,90 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 	}
 	r.mu.Unlock()
 
+	// Every answer carries the write's stamp, the 504 included: a retry sends it back.
+	w.Header().Set(HeaderStamp, strconv.FormatUint(rec.Stamp, 10))
+	status := r.awaitCommit(req, epoch, rec.LSN, start)
+	wait := time.Since(start)
+	if status >= 0 {
+		r.metrics.commitWait.With().Observe(wait.Seconds())
+		r.mu.Lock()
+		r.waits.add(wait)
+		r.mu.Unlock()
+	}
 	// One log line per write on the leader: the request ID next to the LSN it got, so the
 	// followers' lines (which name LSN ranges) can be found from the coordinator's (ADR-0029).
-	done := func(status int) {
-		wait := time.Since(start)
-		r.metrics.commitWait.With().Observe(wait.Seconds())
-		slog.Info("write", "request_id", req.Header.Get(httpx.HeaderRequestID), "op", opName(op),
-			"epoch", epoch, "lsn", rec.LSN, "status", status, "commit_wait_ms", float64(wait.Microseconds())/1000)
+	logged := status
+	if status == 0 {
+		logged = okStatus
 	}
-	timeout := time.NewTimer(r.cfg.CommitTimeout)
+	slog.Info("write", "request_id", reqID, "op", opName(op), "epoch", epoch, "lsn", rec.LSN,
+		"stamp", rec.Stamp, "status", logged, "commit_wait_ms", float64(wait.Microseconds())/1000)
+	switch status {
+	case 0:
+		w.Header().Set("ETag", etag(rec.Stamp))
+		w.WriteHeader(okStatus)
+	case http.StatusGatewayTimeout:
+		httpx.WriteError(w, http.StatusGatewayTimeout, fmt.Sprintf(
+			"not committed within %s or leadership changed; outcome unknown", r.cfg.CommitTimeout))
+	}
+}
+
+// awaitCommit waits until the record at lsn is committed in this epoch: 0 when it is,
+// 504 when the commit wait times out or leadership changes, -1 when the client is gone.
+func (r *Replica) awaitCommit(req *http.Request, epoch, lsn uint64, start time.Time) int {
+	timeout := time.NewTimer(r.cfg.CommitTimeout - time.Since(start))
 	defer timeout.Stop()
 	for {
 		r.mu.Lock()
-		committed := r.commit >= rec.LSN && r.epoch == epoch
+		committed := r.commit >= lsn && r.epoch == epoch
 		stillLeader := r.isLeaderLocked() && r.epoch == epoch
 		ch := r.changed
-		if committed {
-			r.waits.add(time.Since(start))
-		}
 		r.mu.Unlock()
 		switch {
 		case committed:
-			done(okStatus)
-			w.WriteHeader(okStatus)
-			return
+			return 0
 		case !stillLeader:
-			done(http.StatusGatewayTimeout)
-			httpx.WriteError(w, http.StatusGatewayTimeout, "not committed: leadership changed; outcome unknown")
-			return
+			return http.StatusGatewayTimeout
 		}
 		select {
 		case <-ch:
 		case <-timeout.C:
-			r.mu.Lock()
-			r.waits.add(time.Since(start))
-			r.mu.Unlock()
-			done(http.StatusGatewayTimeout)
-			httpx.WriteError(w, http.StatusGatewayTimeout, fmt.Sprintf(
-				"not committed: no follower had it within %s; outcome unknown", r.cfg.CommitTimeout))
-			return
+			return http.StatusGatewayTimeout
 		case <-req.Context().Done():
-			return
+			return -1
 		}
 	}
 }
+
+// maxStampAhead bounds a client's stamp against the leader's physical clock (ADR-0028).
+const maxStampAhead = 5000 // ms
+
+// writeOpts reads a write's version rules from its headers: the stamp a retry sends back,
+// If-Match and If-None-Match (ADR-0028).
+func writeOpts(req *http.Request) (store.WriteOpts, error) {
+	var o store.WriteOpts
+	if s := req.Header.Get(HeaderStamp); s != "" {
+		v, err := strconv.ParseUint(s, 10, 64)
+		if err != nil || v == 0 {
+			return o, errors.New("X-KV-Timestamp must be a stamp the store returned")
+		}
+		o.Stamp = v
+	}
+	if m := req.Header.Get("If-Match"); m != "" {
+		v, err := strconv.ParseUint(strings.Trim(m, `"`), 10, 64)
+		if err != nil {
+			return o, errors.New(`If-Match must be an ETag the store returned, e.g. "123"`)
+		}
+		o.IfMatch, o.HasIfMatch = v, true
+	}
+	if req.Header.Get("If-None-Match") == "*" {
+		o.IfNoneMatch = true
+	}
+	return o, nil
+}
+
+// etag is a version as an HTTP entity tag: the record's stamp, quoted.
+func etag(stamp uint64) string { return `"` + strconv.FormatUint(stamp, 10) + `"` }
 
 // serveLog is the leader's side of replication (ADR-0023 steps 1, 2, 5). The follower
 // sends the epoch, LSN and hash of its last durable record:

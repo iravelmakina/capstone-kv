@@ -2,11 +2,17 @@
 // append-only log on disk, replayed at start (ADR-0013). From M3 the same log is the
 // replication log (ADR-0022): followers receive the leader's records byte for byte.
 //
-// Record format (integers big-endian):
+// Record format (integers big-endian); new records are written in format 2 (ADR-0028),
+// format 1 records (M3) are still read, with stamp 0:
 //
-//	[1 B format version = 1][4 B body length n]
-//	body: [8 B epoch][8 B LSN][8 B prev hash][1 B op: 1=put, 2=delete][2 B key length][key][value]
+//	[1 B format version][4 B body length n]
+//	body, format 1: [8 B epoch][8 B LSN][8 B prev hash][1 B op: 1=put, 2=delete][2 B key length][key][value]
+//	body, format 2: [8 B epoch][8 B LSN][8 B prev hash][8 B HLC stamp][1 B op][2 B key length][key][value]
 //	[4 B CRC-32C over everything before it]
+//
+// The stamp is a hybrid logical clock: physical milliseconds in the high 48 bits, a
+// counter in the low 16. A leader's own stamps rise with every record; a key's stamps
+// rise with every write to it (last-write-wins, ADR-0028).
 //
 // LSNs start at 1 and grow by 1. "prev hash" is xxhash64 of the previous record's bytes
 // (0 for the first), so two logs that differ anywhere differ in every later link. A key's
@@ -33,6 +39,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 )
@@ -41,9 +48,11 @@ const (
 	OpPut    byte = 1
 	OpDelete byte = 2
 
-	formatVersion byte = 1
+	format1       byte = 1                 // M3: no stamp
+	formatVersion byte = 2                 // M4: with the HLC stamp; every new record
 	prefixSize         = 1 + 4             // format version + body length
-	bodyFixed          = 8 + 8 + 8 + 1 + 2 // epoch, LSN, prev hash, op, key length
+	bodyFixed1         = 8 + 8 + 8 + 1 + 2 // epoch, LSN, prev hash, op, key length
+	bodyFixed          = bodyFixed1 + 8    // format 2 adds the stamp
 	sumSize            = 4                 // CRC-32C
 	Overhead           = prefixSize + bodyFixed + sumSize
 	maxRecord          = 8 << 20 // 8 MiB: anything longer is treated as a damaged length field
@@ -63,6 +72,11 @@ var (
 	ErrBrokenChain = errors.New("hash chain broken")
 	// ErrStaleEpoch: a write carries an epoch older than the log's last record.
 	ErrStaleEpoch = errors.New("epoch older than the log's")
+	// ErrSuperseded: the key's latest record has a stamp at least as high as the write's,
+	// so the write loses (last-write-wins, ADR-0028) and isn't appended.
+	ErrSuperseded = errors.New("superseded by a newer write")
+	// ErrPrecondition: an If-Match or If-None-Match condition doesn't hold.
+	ErrPrecondition = errors.New("precondition failed")
 )
 
 // Version orders writes: epoch first, then LSN.
@@ -82,18 +96,30 @@ func (v Version) Less(o Version) bool {
 // Record is one decoded log record.
 type Record struct {
 	Epoch, LSN, Prev uint64
+	Stamp            uint64 // HLC stamp; 0 for format 1 records
 	Op               byte
 	Key              string
 	Value            []byte
+	format           byte // as read; 0 means "write in the current format"
 }
 
 // Version returns the record's version.
 func (r Record) Version() Version { return Version{r.Epoch, r.LSN} }
 
-// Entry is what the store holds for a key: its last value or a tombstone, and its version.
+// Entry is what the store holds for a key: its last value or a tombstone, and its version
+// and stamp.
 type Entry struct {
 	Value   []byte
 	Version Version
+	Stamp   uint64
+	Deleted bool
+}
+
+// Head is a key's latest record in the log, committed or not: what last-write-wins and
+// conditional writes compare against (ADR-0028).
+type Head struct {
+	Stamp   uint64
+	LSN     uint64
 	Deleted bool
 }
 
@@ -117,13 +143,15 @@ type logFile interface {
 
 // Store is a durable key-value map over a log. Safe for concurrent use.
 type Store struct {
-	mu   sync.RWMutex
-	data map[string]Entry
-	recs []meta
-	path string
-	f    logFile  // appends
-	rf   *os.File // reads (ReadAfter, rebuild after truncation); ReadAt is safe concurrently
-	end  int64    // offset just after the last good record: where the next append goes
+	mu    sync.RWMutex
+	data  map[string]Entry
+	heads map[string]Head // each key's latest record in the log
+	clock uint64          // the highest stamp in the log: the HLC's last value
+	recs  []meta
+	path  string
+	f     logFile  // appends
+	rf    *os.File // reads (ReadAfter, rebuild after truncation); ReadAt is safe concurrently
+	end   int64    // offset just after the last good record: where the next append goes
 	// broken is set when a failed write couldn't be cut back: from then on every write
 	// fails, so nothing is ever appended after garbage. Cleared only by a restart.
 	broken error
@@ -174,6 +202,8 @@ func (s *Store) closeFiles() {
 // in the file is an error (ErrDamaged).
 func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 	s.data = map[string]Entry{}
+	s.heads = map[string]Head{}
+	s.clock = 0
 	s.recs = s.recs[:0]
 	br := bufio.NewReader(r)
 	var offset int64
@@ -195,10 +225,10 @@ func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 		}
 		n := int64(binary.BigEndian.Uint32(prefix[1:5]))
 		end := offset + prefixSize + n + sumSize
-		if prefix[0] != formatVersion {
+		if prefix[0] != formatVersion && prefix[0] != format1 {
 			return damaged(end, fmt.Sprintf("unknown format version %d", prefix[0]))
 		}
-		if n < bodyFixed || n > maxRecord {
+		if n < int64(bodyFixedOf(prefix[0])) || n > maxRecord {
 			return damaged(end, "impossible record length")
 		}
 		b := make([]byte, prefixSize+n+sumSize)
@@ -214,6 +244,7 @@ func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 			return damaged(end, err.Error())
 		}
 		s.recs = append(s.recs, meta{offset: offset, epoch: rec.Epoch, hash: xxhash.Sum64(b)})
+		s.noteHead(rec)
 		s.apply(rec)
 		offset = end
 	}
@@ -233,29 +264,50 @@ func (s *Store) follows(rec Record) error {
 	return nil
 }
 
-// encode builds the bytes of one complete record.
+// bodyFixedOf is the fixed part of a body in the given format.
+func bodyFixedOf(format byte) int {
+	if format == format1 {
+		return bodyFixed1
+	}
+	return bodyFixed
+}
+
+// encode builds the bytes of one complete record, in the format it was read in (a
+// follower must store the leader's bytes exactly, or the hash chain breaks), or in the
+// current format for a new record.
 func (r Record) encode() []byte {
-	n := bodyFixed + len(r.Key) + len(r.Value)
+	format := r.format
+	if format == 0 {
+		format = formatVersion
+	}
+	fixed := bodyFixedOf(format)
+	n := fixed + len(r.Key) + len(r.Value)
 	b := make([]byte, prefixSize+n+sumSize)
-	b[0] = formatVersion
+	b[0] = format
 	binary.BigEndian.PutUint32(b[1:5], uint32(n))
 	p := b[prefixSize:]
 	binary.BigEndian.PutUint64(p[0:8], r.Epoch)
 	binary.BigEndian.PutUint64(p[8:16], r.LSN)
 	binary.BigEndian.PutUint64(p[16:24], r.Prev)
-	p[24] = r.Op
-	binary.BigEndian.PutUint16(p[25:27], uint16(len(r.Key)))
-	copy(p[27:], r.Key)
-	copy(p[27+len(r.Key):], r.Value)
+	at := 24
+	if format != format1 {
+		binary.BigEndian.PutUint64(p[24:32], r.Stamp)
+		at = 32
+	}
+	p[at] = r.Op
+	binary.BigEndian.PutUint16(p[at+1:at+3], uint16(len(r.Key)))
+	copy(p[fixed:], r.Key)
+	copy(p[fixed+len(r.Key):], r.Value)
 	binary.BigEndian.PutUint32(b[prefixSize+n:], crc32.Checksum(b[:prefixSize+n], castagnoli))
 	return b
 }
 
 // decode parses the bytes of one complete record and checks its checksum.
 func decode(b []byte) (Record, error) {
-	if len(b) < Overhead || b[0] != formatVersion {
+	if len(b) < prefixSize+bodyFixed1+sumSize || (b[0] != formatVersion && b[0] != format1) {
 		return Record{}, errors.New("not a record")
 	}
+	fixed := bodyFixedOf(b[0])
 	n := int(binary.BigEndian.Uint32(b[1:5]))
 	if prefixSize+n+sumSize != len(b) {
 		return Record{}, errors.New("length field doesn't match the record")
@@ -263,22 +315,31 @@ func decode(b []byte) (Record, error) {
 	if crc32.Checksum(b[:prefixSize+n], castagnoli) != binary.BigEndian.Uint32(b[prefixSize+n:]) {
 		return Record{}, errors.New("checksum mismatch")
 	}
+	if n < fixed {
+		return Record{}, errors.New("record shorter than its fixed fields")
+	}
 	p := b[prefixSize : prefixSize+n]
 	rec := Record{
-		Epoch: binary.BigEndian.Uint64(p[0:8]),
-		LSN:   binary.BigEndian.Uint64(p[8:16]),
-		Prev:  binary.BigEndian.Uint64(p[16:24]),
-		Op:    p[24],
+		Epoch:  binary.BigEndian.Uint64(p[0:8]),
+		LSN:    binary.BigEndian.Uint64(p[8:16]),
+		Prev:   binary.BigEndian.Uint64(p[16:24]),
+		format: b[0],
 	}
-	klen := int(binary.BigEndian.Uint16(p[25:27]))
-	if 27+klen > len(p) {
+	at := 24
+	if b[0] != format1 {
+		rec.Stamp = binary.BigEndian.Uint64(p[24:32])
+		at = 32
+	}
+	rec.Op = p[at]
+	klen := int(binary.BigEndian.Uint16(p[at+1 : at+3]))
+	if fixed+klen > len(p) {
 		return Record{}, errors.New("key length past end of record")
 	}
 	if rec.Op != OpPut && rec.Op != OpDelete {
 		return Record{}, fmt.Errorf("unknown op %d", rec.Op)
 	}
-	rec.Key = string(p[27 : 27+klen])
-	rec.Value = append([]byte(nil), p[27+klen:]...)
+	rec.Key = string(p[fixed : fixed+klen])
+	rec.Value = append([]byte(nil), p[fixed+klen:]...)
 	return rec, nil
 }
 
@@ -309,7 +370,7 @@ func (s *Store) apply(rec Record) {
 	if cur, ok := s.data[rec.Key]; ok && !cur.Version.Less(rec.Version()) {
 		return
 	}
-	e := Entry{Version: rec.Version(), Deleted: rec.Op == OpDelete}
+	e := Entry{Version: rec.Version(), Stamp: rec.Stamp, Deleted: rec.Op == OpDelete}
 	if !e.Deleted {
 		e.Value = rec.Value
 	}
@@ -348,23 +409,56 @@ func (s *Store) appendBytes(b []byte) error {
 	return err
 }
 
-// Write appends the next record of the given epoch to the log and flushes it, but doesn't
-// apply it: a leader applies only after the write commits (ADR-0023), with Apply.
+// Write appends the next record of the given epoch to the log, stamped by the store's
+// clock, and flushes it, but doesn't apply it: a leader applies only after the write
+// commits (ADR-0023), with Apply.
 func (s *Store) Write(epoch uint64, op byte, key string, value []byte) (Record, error) {
+	rec, _, err := s.WriteVersioned(epoch, op, key, value, WriteOpts{}, nowMillis())
+	return rec, err
+}
+
+// WriteOpts are a leader write's version rules (ADR-0028).
+type WriteOpts struct {
+	Stamp       uint64 // a stamp the client sends back (a retry); 0 = the store stamps it
+	IfMatch     uint64 // with HasIfMatch: apply only if this is the key's latest stamp
+	HasIfMatch  bool
+	IfNoneMatch bool // apply only if the key has no live latest record (create only)
+}
+
+// WriteVersioned is Write with last-write-wins and conditions, checked and appended under
+// one lock so no other write to the key can slip in between. It returns the key's head
+// before the write: on ErrSuperseded it is the record that wins, which the leader waits
+// to see committed before it answers. nowMs is the leader's physical clock.
+func (s *Store) WriteVersioned(epoch uint64, op byte, key string, value []byte, o WriteOpts, nowMs uint64) (Record, Head, error) {
 	if len(key) > maxKey || bodyFixed+len(key)+len(value) > maxRecord {
-		return Record{}, errors.New("record too large")
+		return Record{}, Head{}, errors.New("record too large")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.writeLocked(epoch, op, key, value)
+	head, exists := s.heads[key]
+	switch {
+	case o.HasIfMatch && (!exists || head.Stamp != o.IfMatch):
+		return Record{}, head, ErrPrecondition
+	case o.IfNoneMatch && exists && !head.Deleted:
+		return Record{}, head, ErrPrecondition
+	}
+	stamp := o.Stamp
+	if stamp == 0 {
+		stamp = max(nowMs<<16, s.clock+1)
+	} else if exists && stamp <= head.Stamp {
+		s.clock = max(s.clock, stamp) // HLC receive rule, even for a write that loses
+		return Record{}, head, ErrSuperseded
+	}
+	rec, err := s.writeLocked(epoch, stamp, op, key, value)
+	return rec, head, err
 }
 
-func (s *Store) writeLocked(epoch uint64, op byte, key string, value []byte) (Record, error) {
+func (s *Store) writeLocked(epoch, stamp uint64, op byte, key string, value []byte) (Record, error) {
 	last, hash := s.lastLocked()
 	if epoch < last.Epoch {
 		return Record{}, fmt.Errorf("%w: %d < %d", ErrStaleEpoch, epoch, last.Epoch)
 	}
-	rec := Record{Epoch: epoch, LSN: last.LSN + 1, Prev: hash, Op: op, Key: key,
+	rec := Record{Epoch: epoch, LSN: last.LSN + 1, Prev: hash, Stamp: stamp, Op: op, Key: key,
 		Value: append([]byte(nil), value...)} // own copy: the caller may reuse its buffer
 	b := rec.encode()
 	offset := s.end
@@ -372,8 +466,34 @@ func (s *Store) writeLocked(epoch uint64, op byte, key string, value []byte) (Re
 		return Record{}, err
 	}
 	s.recs = append(s.recs, meta{offset: offset, epoch: epoch, hash: xxhash.Sum64(b)})
+	s.noteHead(rec)
 	return rec, nil
 }
+
+// noteHead records rec as its key's latest record and moves the clock past its stamp.
+// Callers hold the lock.
+func (s *Store) noteHead(rec Record) {
+	s.heads[rec.Key] = Head{Stamp: rec.Stamp, LSN: rec.LSN, Deleted: rec.Op == OpDelete}
+	s.clock = max(s.clock, rec.Stamp)
+}
+
+// Head returns the key's latest record in the log, committed or not.
+func (s *Store) Head(key string) (Head, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h, ok := s.heads[key]
+	return h, ok
+}
+
+// Clock returns the highest stamp in the log.
+func (s *Store) Clock() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.clock
+}
+
+// nowMillis is the physical clock in Unix milliseconds.
+func nowMillis() uint64 { return uint64(time.Now().UnixMilli()) }
 
 // Apply makes a written record visible to reads (see Write).
 func (s *Store) Apply(rec Record) {
@@ -420,6 +540,7 @@ func (s *Store) Replicate(raw []byte) error {
 	}
 	s.recs = append(s.recs, added...)
 	for _, rec := range recs[len(recs)-len(added):] {
+		s.noteHead(rec)
 		s.apply(rec)
 	}
 	return nil
@@ -518,7 +639,7 @@ func (s *Store) Put(key string, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	last, _ := s.lastLocked()
-	rec, err := s.writeLocked(last.Epoch, OpPut, key, value)
+	rec, err := s.writeLocked(last.Epoch, max(nowMillis()<<16, s.clock+1), OpPut, key, value)
 	if err != nil {
 		return err
 	}
@@ -534,7 +655,7 @@ func (s *Store) Delete(key string) (bool, error) {
 		return false, nil
 	}
 	last, _ := s.lastLocked()
-	rec, err := s.writeLocked(last.Epoch, OpDelete, key, nil)
+	rec, err := s.writeLocked(last.Epoch, max(nowMillis()<<16, s.clock+1), OpDelete, key, nil)
 	if err != nil {
 		return false, err
 	}

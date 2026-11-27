@@ -20,13 +20,13 @@
 
 ## 3. Record versions
 
-- [ ] 3.1 Record format 2 with an HLC stamp; format 1 still read (stamp 0)
-- [ ] 3.2 Leader stamps with `max(now, last + 1)`; a new leader starts above its log's last stamp
-- [ ] 3.3 The stamp on every write answer, 504 included
-- [ ] 3.4 `X-KV-Timestamp` from the client: 400 if its physical part is more than 5 s ahead of the leader's physical clock; HLC receive rule
-- [ ] 3.5 Last-write-wins against the key's latest record in the log; the superseded answer waits for that record's commit (504 if it times out)
-- [ ] 3.6 `ETag` (the stamp) and `X-KV-Timestamp` on reads; `If-Match` on PUT and DELETE, `If-None-Match: *` on PUT, 412 otherwise
-- [ ] 3.7 Tests: stamps rise across a promotion, a late retry is superseded, superseded only after commit, a future stamp refused, `If-Match` and `If-None-Match` conflicts
+- [x] 3.1 Record format 2 with an HLC stamp; format 1 still read (stamp 0)
+- [x] 3.2 Leader stamps with `max(now, last + 1)`; a new leader starts above its log's last stamp
+- [x] 3.3 The stamp on every write answer, 504 included
+- [x] 3.4 `X-KV-Timestamp` from the client: 400 if its physical part is more than 5 s ahead of the leader's physical clock; HLC receive rule
+- [x] 3.5 Last-write-wins against the key's latest record in the log; the superseded answer waits for that record's commit (504 if it times out)
+- [x] 3.6 `ETag` (the stamp) and `X-KV-Timestamp` on reads; `If-Match` on PUT and DELETE, `If-None-Match: *` on PUT, 412 otherwise
+- [x] 3.7 Tests: stamps rise across a promotion, a late retry is superseded, superseded only after commit, a future stamp refused, `If-Match` and `If-None-Match` conflicts
 - [ ] 3.8 `scripts/failure-tests.sh` still passes, plus a late-retry scenario
 
 ## 4. API keys

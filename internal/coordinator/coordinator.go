@@ -219,14 +219,14 @@ func (c *Coordinator) item(w http.ResponseWriter, r *http.Request) {
 	ri := info(r)
 	ri.keyHash = strconv.FormatUint(xxhash.Sum64String(storageKey), 16)
 	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		c.write(w, ri, r.Method, routing, path, body)
+		c.write(w, ri, r.Header, r.Method, routing, path, body)
 	} else {
 		c.read(w, ri, r.Method, routing, path)
 	}
 }
 
 // write sends a put or delete to the shard's leader and relays the answer (ADR-0021).
-func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, method string, routing []byte, path string, body []byte) {
+func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, method string, routing []byte, path string, body []byte) {
 	id, addr, ok := c.members.WriteTarget(routing)
 	ri.shard = id
 	if !ok {
@@ -235,6 +235,11 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, method string, r
 	}
 	req, _ := http.NewRequest(method, addr+path, bytes.NewReader(body))
 	req.Header.Set(httpx.HeaderRequestID, ri.id)
+	for _, h := range versionRequestHeaders { // a retry's stamp, conditions (ADR-0028)
+		if v := in.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		// Alive by heartbeat but not answering: same honest answer, try later.
@@ -243,6 +248,11 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, method string, r
 	}
 	defer resp.Body.Close()
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	for _, h := range versionResponseHeaders { // the write's stamp, superseded, version
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusNoContent:
 		w.WriteHeader(resp.StatusCode)
@@ -261,8 +271,15 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, method string, r
 type answer struct {
 	found   bool
 	version store.Version // zero when the replica never had the key
+	stamp   string        // the record's HLC stamp (ADR-0028)
 	body    []byte
 }
+
+// Headers a write passes to the leader, and those its answer passes back (ADR-0028).
+var (
+	versionRequestHeaders  = []string{shard.HeaderStamp, "If-Match", "If-None-Match"}
+	versionResponseHeaders = []string{shard.HeaderStamp, shard.HeaderSuperseded, "ETag"}
+)
 
 // read asks R live replicas of the shard (rotating, ADR-0021) and returns the answer
 // with the newest version; a tombstone or "never had it" is 404. A replica that doesn't
@@ -315,6 +332,10 @@ func (c *Coordinator) read(w http.ResponseWriter, ri *reqInfo, method string, ro
 		httpx.WriteError(w, http.StatusNotFound, "item not found")
 	default:
 		w.Header().Set("Content-Type", "application/json")
+		if newest.stamp != "" {
+			w.Header().Set(shard.HeaderStamp, newest.stamp)
+			w.Header().Set("ETag", `"`+newest.stamp+`"`)
+		}
 		w.WriteHeader(http.StatusOK)
 		if method == http.MethodGet {
 			w.Write(newest.body)
@@ -337,6 +358,7 @@ func (c *Coordinator) ask(requestID, method, url string) *answer {
 	a := &answer{found: resp.StatusCode == http.StatusOK}
 	a.version.Epoch, _ = strconv.ParseUint(resp.Header.Get(shard.HeaderEpoch), 10, 64)
 	a.version.LSN, _ = strconv.ParseUint(resp.Header.Get(shard.HeaderLSN), 10, 64)
+	a.stamp = resp.Header.Get(shard.HeaderStamp)
 	if a.found && method == http.MethodGet {
 		if a.body, err = io.ReadAll(resp.Body); err != nil {
 			return nil
