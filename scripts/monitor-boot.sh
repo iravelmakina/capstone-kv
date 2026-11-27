@@ -27,6 +27,10 @@ mkdir -p "$ROOT/secrets/telegram" "$ROOT/targets"
 aws s3 cp "s3://$BUCKET/releases/$VERSION/monitoring.tar.gz" /tmp/monitoring.tar.gz --region "$REGION"
 rm -rf "$ROOT/monitoring" && mkdir -p "$ROOT/monitoring"
 tar -xzf /tmp/monitoring.tar.gz -C "$ROOT/monitoring"
+# macOS tar adds AppleDouble files (._name) for extended attributes; Grafana tries to parse
+# ._dashboards.yml as provisioning and exits (M4 lab). `make release` leaves them out now;
+# this also cleans a release made before that.
+find "$ROOT/monitoring" -name '._*' -delete
 
 # 2. Secrets into files. The monitoring secret is JSON:
 #    {"telegram_token": "...", "telegram_chat_id": "...", "grafana_password": "..."}

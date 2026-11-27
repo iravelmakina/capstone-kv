@@ -166,7 +166,7 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \
 	$(AWS) s3 cp scripts/smoke-replica.sh s3://$(BUCKET)/releases/$(VERSION)/smoke-replica.sh; \
 	$(AWS) s3 cp scripts/monitor-boot.sh s3://$(BUCKET)/releases/$(VERSION)/monitor-boot.sh; \
-	tar -czf - -C monitoring . | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/monitoring.tar.gz; \
+	COPYFILE_DISABLE=1 tar --exclude='._*' -czf - -C monitoring . | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/monitoring.tar.gz; \
 	echo "released $(VERSION) to s3://$(BUCKET)/releases/$(VERSION)/"
 
 BENCH ?= false   # BENCH=true adds the benchmark client instance to the app stack
