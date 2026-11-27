@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -100,6 +101,39 @@ func TestContract(t *testing.T) {
 			}
 		}
 	}
+	// With API keys and versions (ADR-0027, ADR-0028): 401, 403 and 412 are documented
+	// where the coordinator returns them.
+	keyedCluster := newCluster(t, 1, true)
+	send := keyed(t, keyedCluster)
+	k := keyedCluster.coord.URL
+	send("POST", k+"/v1/tables", `{"name":"users","partitionKey":"userId"}`, "ops-key")
+	send("PUT", k+"/v1/tables/users/items/u1", `{"a":1}`, "ops-key")
+	for _, s := range []struct{ op, method, url, body, key string }{
+		{"listTables", "GET", k + "/v1/tables", "", ""},                                         // 401
+		{"createTable", "POST", k + "/v1/tables", `{"name":"x","partitionKey":"y"}`, "mcp-key"}, // 403
+		{"getTable", "GET", k + "/v1/tables/users", "", "nope"},                                 // 401
+		{"getItem", "GET", k + "/v1/tables/users/items/u1", "", ""},                             // 401
+		{"itemExists", "HEAD", k + "/v1/tables/users/items/u1", "", ""},                         // 401
+		{"deleteItem", "DELETE", k + "/v1/tables/users/items/u1", "", "mcp-key"},                // 403
+		{"putItem", "PUT", k + "/v1/tables/users/items/u1", `{"a":2}`, ""},                      // 401
+	} {
+		code, _ := send(s.method, s.url, s.body, s.key)
+		if !documented[s.op][code] {
+			t.Errorf("%s %s -> %d, not documented for %s", s.method, s.url, code, s.op)
+		}
+	}
+	req, _ := http.NewRequest("PUT", k+"/v1/tables/users/items/u1", strings.NewReader(`{"a":3}`))
+	req.Header.Set("Authorization", "Bearer ops-key")
+	req.Header.Set("If-None-Match", "*")
+	if resp, err := http.DefaultClient.Do(req); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != 412 || !documented["putItem"][412] {
+			t.Errorf("create-only put over an existing item -> %d (412 documented: %v)", resp.StatusCode, documented["putItem"][412])
+		}
+	}
+
 	for op := range documented {
 		if !exercised[op] {
 			t.Errorf("operation %s is in openapi.yaml but not exercised by this test", op)

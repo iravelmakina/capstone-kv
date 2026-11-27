@@ -20,6 +20,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
@@ -49,6 +50,7 @@ type Coordinator struct {
 	client  *http.Client // to the shards: keep-alive connections, short timeout
 	r       int          // replicas each read asks (R, ADR-0021)
 	metrics *coordMetrics
+	keys    *auth.Keyring // nil: no API keys required (tests and local runs without keys)
 }
 
 // New builds a coordinator. tables persists the registry; members tracks the replica

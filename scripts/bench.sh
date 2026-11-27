@@ -20,8 +20,14 @@ cd "$WORK" || exit 1
 aws s3 cp --recursive "s3://$BUCKET/bench/$VERSION/" . --region "$REGION" --quiet || exit 1
 chmod +x kvbench
 
+# The API key (ADR-0027) from Secrets Manager into a properties file, so it stays off
+# command lines; empty when the secret doesn't exist (a store without keys).
+( umask 077
+  aws secretsmanager get-secret-value --secret-id velmakina-kv/ops-key --query SecretString \
+    --output text --region "$REGION" 2>/dev/null | sed 's/^/kv.apikey=/' > key.properties ) || true
+
 # The same properties for every run; per-run differences come only from the workload file.
-COMMON=(-P workloads/common -p "kv.url=$URL")
+COMMON=(-P workloads/common -P key.properties -p "kv.url=$URL")
 
 # step <output file> <kvbench args...>: run; print the final summary (everything from the
 # "finished" line on), or on failure the output's last lines, and stop.

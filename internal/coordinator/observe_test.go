@@ -2,11 +2,15 @@ package coordinator
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
 
@@ -76,5 +80,78 @@ func TestRequestIDPassedToReplicas(t *testing.T) {
 	}
 	if seen != 2 { // R = 2 replicas asked
 		t.Fatalf("%d replicas got request ID %s, want 2", seen, id)
+	}
+}
+
+// keyed gives the cluster's coordinator a keys file with an admin key ("ops") and a
+// read+write key ("mcp"), and returns a request helper that sends a key.
+func keyed(t *testing.T, c *cluster) func(method, url, body, key string) (int, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "keys.json")
+	os.WriteFile(path, []byte(`[
+		{"name":"ops","sha256":"`+auth.Hash("ops-key")+`","scopes":["read","write","delete","admin"]},
+		{"name":"mcp","sha256":"`+auth.Hash("mcp-key")+`","scopes":["read","write"]}]`), 0o600)
+	keys, err := auth.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.obj.UseKeys(keys)
+	return func(method, url, body, key string) (int, string) {
+		req, _ := http.NewRequest(method, url, strings.NewReader(body))
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+}
+
+// Specs "No key", "Missing scope" and "Who deleted it".
+func TestAPIKeys(t *testing.T) {
+	c := newCluster(t, 1, true)
+	do := keyed(t, c)
+	items := c.coord.URL + "/v1/tables/users/items/u1"
+	if code, _ := do("POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`, "mcp-key"); code != 403 {
+		t.Fatalf("create table with a read+write key = %d, want 403", code)
+	}
+	if code, _ := do("POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`, "ops-key"); code != 201 {
+		t.Fatalf("create table with the admin key = %d, want 201", code)
+	}
+	if code, _ := do("PUT", items, `{"a":1}`, "mcp-key"); code != 200 {
+		t.Fatalf("put with a write key = %d", code)
+	}
+	if code, _ := do("GET", items, "", ""); code != 401 {
+		t.Fatalf("read without a key = %d, want 401", code)
+	}
+	if code, _ := do("GET", items, "", "wrong"); code != 401 {
+		t.Fatalf("read with an unknown key = %d, want 401", code)
+	}
+	if code, _ := do("DELETE", items, "", "mcp-key"); code != 403 {
+		t.Fatalf("delete without the delete scope = %d, want 403", code)
+	}
+	if code, _ := do("GET", items, "", "mcp-key"); code != 200 {
+		t.Fatalf("item gone after a refused delete (GET = %d)", code)
+	}
+	if code, _ := do("DELETE", items, "", "ops-key"); code != 204 {
+		t.Fatalf("delete with the delete scope = %d", code)
+	}
+	if code, _ := call(t, "GET", c.coord.URL+"/health", ""); code != 200 {
+		t.Fatalf("/health needs no key, got %d", code)
+	}
+	m := scrapeCoordinator(c)
+	for _, want := range []string{
+		`kv_requests_total{op="write",code="200",shard="shard-1",principal="mcp"} 1`,
+		`kv_requests_total{op="delete",code="403",shard="",principal="mcp"} 1`,
+		`kv_requests_total{op="delete",code="204",shard="shard-1",principal="ops"} 1`,
+		`kv_requests_total{op="read",code="401",shard="",principal="-"} 2`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metrics miss %q", want)
+		}
 	}
 }

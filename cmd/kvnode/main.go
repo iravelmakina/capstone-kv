@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/coordinator"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
 	"github.com/iravelmakina/capstone-kv/internal/shard"
@@ -65,6 +66,7 @@ func main() {
 	replicas := flag.Int("replicas", envInt("KV_REPLICAS", 3), "replicas per shard, N")
 	leaders := flag.String("leaders", env("KV_LEADERS", ""), "first leader per shard, e.g. shard-1=1a,shard-2=2b")
 	vnodes := flag.Int("vnodes", envInt("KV_VNODES", ring.DefaultVirtualNodes), "virtual nodes per shard (ADR-0011)")
+	apiKeys := flag.String("api-keys-file", env("KV_API_KEYS_FILE", ""), "API key hashes and scopes (ADR-0027); empty = no keys required")
 	timeout := flag.Duration("heartbeat-timeout", envDuration("KV_HEARTBEAT_TIMEOUT", 15*time.Second), "silence after which a replica is unavailable")
 
 	// Replica settings.
@@ -114,6 +116,16 @@ func main() {
 		// R + W > N: with W = 2 two replicas answer each read, with W = 1 all of them (ADR-0021).
 		r := *replicas + 1 - *w
 		coord := coordinator.New(tables, members, r)
+		if *apiKeys != "" {
+			keys, err := auth.Load(*apiKeys)
+			if err != nil {
+				log.Fatalf("load API keys: %v", err) // fail closed: never serve without the keys asked for
+			}
+			coord.UseKeys(keys)
+			go keys.Watch(ctx, 5*time.Second)
+		} else {
+			log.Print("no API keys file: the public API is open (local use only)")
+		}
 		handler, metricsHandler = coord.Handler(), coord.MetricsHandler()
 		log.Printf("coordinator: %d shards × %d replicas, W=%d R=%d, %d virtual nodes", *expected, *replicas, *w, r, *vnodes)
 

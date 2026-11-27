@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/metrics"
 )
@@ -131,17 +132,37 @@ func itemOp(r *http.Request) string {
 	return "read"
 }
 
-// observe wraps a public route: it gives the request an ID (returned to the client), and
-// afterwards counts it, records its latency and logs one JSON line about it.
+// UseKeys makes every public route require an API key with the right scope (ADR-0027).
+func (c *Coordinator) UseKeys(k *auth.Keyring) { c.keys = k }
+
+// scopeOf is the scope an operation needs.
+func scopeOf(op, method string) string {
+	switch {
+	case op == "write":
+		return auth.Write
+	case op == "delete":
+		return auth.Delete
+	case op == "table" && method == http.MethodPost:
+		return auth.Admin
+	}
+	return auth.Read
+}
+
+// observe wraps a public route: it gives the request an ID (returned to the client),
+// checks its API key and scope, and afterwards counts it, records its latency and logs one
+// JSON line about it, naming the key (never its value).
 func (c *Coordinator) observe(op func(*http.Request) string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ri := &reqInfo{id: httpx.RequestID(r), principal: "-"}
 		w.Header().Set(httpx.HeaderRequestID, ri.id)
 		rec := &httpx.StatusRecorder{ResponseWriter: w}
-		h(rec, r.WithContext(context.WithValue(r.Context(), infoKey{}, ri)))
+		name := op(r)
+		if c.authorize(rec, r, ri, scopeOf(name, r.Method)) {
+			h(rec, r.WithContext(context.WithValue(r.Context(), infoKey{}, ri)))
+		}
 
-		name, code, took := op(r), rec.Code(), time.Since(start)
+		code, took := rec.Code(), time.Since(start)
 		c.metrics.requests.With(name, strconv.Itoa(code), ri.shard, ri.principal).Inc()
 		c.metrics.latency.With(name, ri.shard).Observe(took.Seconds())
 		attrs := []any{"request_id", ri.id, "principal", ri.principal, "op", name, "status", code,
@@ -154,6 +175,26 @@ func (c *Coordinator) observe(op func(*http.Request) string, h http.HandlerFunc)
 		}
 		slog.Info("request", attrs...)
 	}
+}
+
+// authorize checks the request's key, records its name as the principal, and answers 401
+// or 403 itself when the request may not go on.
+func (c *Coordinator) authorize(w http.ResponseWriter, r *http.Request, ri *reqInfo, scope string) bool {
+	if c.keys == nil {
+		return true
+	}
+	key, ok := c.keys.Check(auth.Bearer(r.Header.Get("Authorization")))
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="capstone-kv"`)
+		httpx.WriteError(w, http.StatusUnauthorized, "a valid API key is required: Authorization: Bearer <key>")
+		return false
+	}
+	ri.principal = key.Name
+	if !key.Allows(scope) {
+		httpx.WriteError(w, http.StatusForbidden, "this key may not "+scope)
+		return false
+	}
+	return true
 }
 
 // MetricsHandler serves the coordinator's metrics, on the metrics port (ADR-0025).

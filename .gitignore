@@ -7,6 +7,9 @@ credentials*
 *accessKeys*
 *_credentials.csv
 
+# API keys made by `make keys` (values and hashes) — never commit
+secrets/
+
 # Makefile scratch
 .last-change-set
 

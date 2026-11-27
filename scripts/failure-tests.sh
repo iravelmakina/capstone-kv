@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Failure tests on the local cluster (M3 task 5.2): one block per scenario of the
 # `replication` and `quorum-reads` specs, run against real containers.
-#   docker compose down -v && make local-up && scripts/failure-tests.sh
+#   docker compose down -v && make local-up && KV_API_KEY=$(cat secrets/ops.key) scripts/failure-tests.sh
 # Needs a fresh cluster (shard-1 led by 1a, shard-2 by 2b, epoch 1), docker, curl and jq.
 # Prints what it does and checks every result; exits non-zero at the first failure.
 set -euo pipefail
+# API key (ADR-0027) from KV_API_KEY: put in a temporary curl config, so every curl below
+# sends it and the key never appears on a command line.
+if [ -n "${KV_API_KEY:-}" ]; then
+  CURL_HOME=$(mktemp -d)
+  export CURL_HOME
+  trap 'rm -rf "$CURL_HOME"' EXIT
+  printf 'header = "Authorization: Bearer %s"\n' "$KV_API_KEY" > "$CURL_HOME/.curlrc"
+fi
 BASE=http://localhost:8080
 TABLE=ft
 
@@ -132,6 +140,19 @@ make rebuild-replica R=1c >/dev/null 2>&1
 wait_for "1c rebuilt and caught up" 30 same_last "$new" 1c
 docker compose logs r1c 2>/dev/null | grep -E "replayed up to LSN" | tail -1 | sed 's/^/     /'
 health 1c | jq -c '{replica, role, last: .last.lsn, keys}'
+
+section M4-L11 "a late retry loses to a newer write (spec: Late retry loses)"
+# header NAME: prints one response header of the request that follows (curl args).
+header() { local name=$1; shift; curl -s -D - -o /dev/null "$@" | tr -d '\r' | awk -F': ' -v n="$name" 'tolower($1)==tolower(n) {print $2}'; }
+KL=${S2[1]}                         # a shard-2 key; shard-2 is still led by 2b
+dc stop r2a r2c
+t1=$(header X-KV-Timestamp -X PUT -H 'Content-Type: application/json' --data '{"by":"A"}' "$BASE$(item "$KL")")
+check "A's put timed out with a stamp" yes "$([ -n "$t1" ] && echo yes)"
+dc start r2a r2c
+wait_for "shard-2 writable again" 30 sh -c "[ \$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/json' --data '{\"by\":\"B\"}' $BASE$(item "$KL")) = 200 ]"
+check "A's retry with its first stamp is superseded" true \
+  "$(header X-KV-Superseded -X PUT -H 'Content-Type: application/json' -H "X-KV-Timestamp: $t1" --data '{"by":"A"}' "$BASE$(item "$KL")")"
+check "reads return B's value" '{"by":"B"}' "$(curl -s "$BASE$(item "$KL")")"
 
 section M3-L10 "smoke test after all of it"
 scripts/smoke.sh "$BASE" | tail -1

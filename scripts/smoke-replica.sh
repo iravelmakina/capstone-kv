@@ -11,6 +11,14 @@
 # each shard. Locally (docker compose) each replica is its own host, so HOST is one replica.
 # Exits non-zero at the first unexpected result.
 set -euo pipefail
+# API key (ADR-0027) from KV_API_KEY: put in a temporary curl config, so every curl below
+# sends it and the key never appears on a command line.
+if [ -n "${KV_API_KEY:-}" ]; then
+  CURL_HOME=$(mktemp -d)
+  export CURL_HOME
+  trap 'rm -rf "$CURL_HOME"' EXIT
+  printf 'header = "Authorization: Bearer %s"\n' "$KV_API_KEY" > "$CURL_HOME/.curlrc"
+fi
 BASE=$1
 PHASE=$2
 HOST=${3:-}

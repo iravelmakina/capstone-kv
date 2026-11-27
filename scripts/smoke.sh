@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # Smoke test: the four operations against a running coordinator.
-#   scripts/smoke.sh [base-url] [expected-version]   (default http://localhost:8080)
+#   KV_API_KEY=<ops key> scripts/smoke.sh [base-url] [expected-version]   (default http://localhost:8080)
 # Used locally after `docker compose up` and by the CI smoke job on the coordinator, which
 # passes the release it deployed: then the coordinator and every registered shard must
 # report exactly that version in /health. (Shard addresses are private: the version check
 # runs only where they are reachable, i.e. on the coordinator, not on a laptop.)
 # Exits non-zero at the first unexpected status.
 set -euo pipefail
+# API key (ADR-0027) from KV_API_KEY: put in a temporary curl config, so every curl below
+# sends it and the key never appears on a command line.
+if [ -n "${KV_API_KEY:-}" ]; then
+  CURL_HOME=$(mktemp -d)
+  export CURL_HOME
+  trap 'rm -rf "$CURL_HOME"' EXIT
+  printf 'header = "Authorization: Bearer %s"\n' "$KV_API_KEY" > "$CURL_HOME/.curlrc"
+fi
 BASE=${1:-http://localhost:8080}
 EXPECT_VERSION=${2:-}
 TABLE=smoke

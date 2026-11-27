@@ -34,6 +34,7 @@ import (
 const (
 	propURL     = "kv.url"     // coordinator base URL
 	propTimeout = "kv.timeout" // per-request timeout
+	propAPIKey  = "kv.apikey"  // API key (M4, ADR-0027); empty for a store without keys
 )
 
 func init() { ycsb.RegisterDBCreator("capstonekv", creator{}) }
@@ -45,7 +46,8 @@ type creator struct{}
 func (creator) Create(p *properties.Properties) (ycsb.DB, error) {
 	threads := p.GetInt(prop.ThreadCount, int(prop.ThreadCountDefault)) // go-ycsb's default is 200: set it
 	db := &kvDB{
-		base: strings.TrimRight(p.GetString(propURL, "http://localhost:8080"), "/"),
+		base:   strings.TrimRight(p.GetString(propURL, "http://localhost:8080"), "/"),
+		apiKey: p.GetString(propAPIKey, ""),
 		client: &http.Client{
 			Timeout: p.GetParsedDuration(propTimeout, 10*time.Second),
 			// One kept-alive connection per benchmark thread (and some slack), so the
@@ -65,7 +67,15 @@ func (creator) Create(p *properties.Properties) (ycsb.DB, error) {
 
 type kvDB struct {
 	base   string
+	apiKey string
 	client *http.Client
+}
+
+// authorize adds the API key to a request, if one is set.
+func (db *kvDB) authorize(req *http.Request) {
+	if db.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+db.apiKey)
+	}
 }
 
 // waitReady polls /health until the coordinator reports "ready" (all shards registered).
@@ -92,7 +102,10 @@ func (db *kvDB) waitReady(limit time.Duration) error {
 
 func (db *kvDB) ensureTable(table string) error {
 	body := fmt.Sprintf(`{"name":%q,"partitionKey":"ycsb_key"}`, table)
-	resp, err := db.client.Post(db.base+"/v1/tables", "application/json", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, db.base+"/v1/tables", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	db.authorize(req)
+	resp, err := db.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -116,6 +129,7 @@ func (db *kvDB) do(ctx context.Context, method, u string, body []byte, want int)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	db.authorize(req)
 	resp, err := db.client.Do(req)
 	if err != nil {
 		return nil, logError(err)

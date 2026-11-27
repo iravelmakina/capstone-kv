@@ -31,10 +31,10 @@
 
 ## 4. API keys
 
-- [ ] 4.1 `internal/auth`: keys as SHA-256 hashes with name and scopes, loaded from a file and reloaded when it changes
-- [ ] 4.2 `Authorization: Bearer` on every public route; 401 / 403; `/health`, metrics port and `/internal` without keys; `principal` in logs and metrics
+- [x] 4.1 `internal/auth`: keys as SHA-256 hashes with name and scopes, loaded from a file and reloaded when it changes
+- [x] 4.2 `Authorization: Bearer` on every public route; 401 / 403; `/health`, metrics port and `/internal` without keys; `principal` in logs and metrics
 - [ ] 4.3 Smoke test, smoke-replica, benchmark client and failure tests use an ops key; `make rotate-keys` refreshes the coordinator's file through SSM
-- [ ] 4.4 `api/openapi.yaml`: security scheme, 401, 403, 412, 400, the new headers; contract test passes
+- [x] 4.4 `api/openapi.yaml`: security scheme, 401, 403, 412, 400, the new headers; contract test passes
 
 ## 5. MCP server
 

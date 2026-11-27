@@ -43,9 +43,18 @@ for c in $(docker ps -aq --filter name='^kv-' --filter name='^kvnode$'); do dock
 case "$ROLE" in
   coordinator)
     EXPECTED=$4 W=$5
+    # API key hashes (ADR-0027) from Secrets Manager into the coordinator's data folder;
+    # without them the boot stops here and the coordinator never serves an open API.
+    # `make rotate-keys` refreshes the file the same way; the coordinator reloads it.
+    KEYS=$(datadir coordinator)/keys
+    mkdir -p "$KEYS"
+    aws secretsmanager get-secret-value --secret-id velmakina-kv/api-keys --query SecretString \
+      --output text --region "$REGION" > "$KEYS/api-keys.json.new"
+    mv "$KEYS/api-keys.json.new" "$KEYS/api-keys.json"
+    chown -R 65532:65532 "$KEYS"
     docker run -d --name kv-coordinator --restart always -p 8080:8080 -v "$(datadir coordinator)":/data \
       -e KV_ROLE=coordinator -e KV_EXPECTED_SHARDS="$EXPECTED" -e KV_REPLICAS=3 -e KV_W="$W" \
-      -e KV_LEADERS=shard-1=1a,shard-2=2b "$IMAGE"
+      -e KV_LEADERS=shard-1=1a,shard-2=2b -e KV_API_KEYS_FILE=/data/keys/api-keys.json "$IMAGE"
     ;;
   node)
     COORDINATOR_IP=$4 W=$5

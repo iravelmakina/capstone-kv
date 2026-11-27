@@ -23,8 +23,8 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test local-up local-down rebuild-replica smoke \
-        up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws
+.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down rebuild-replica smoke \
+        up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
@@ -117,7 +117,11 @@ rebuild:         ## timed teardown + rebuild (for docs/m1/recreate-log.md)
 test:            ## go vet + all Go tests (incl. contract test and ring distribution)
 	go vet ./... && go test ./...
 
-local-up:        ## build the image and start coordinator + 2 shards x 3 replicas in Docker
+keys:            ## make local API keys in secrets/ (git-ignored), unless they exist (ADR-0027)
+	@scripts/new-api-keys.sh secrets
+	@mkdir -p secrets/telegram   # telegram_token, telegram_chat_id: see docs/m4/runbook.md
+
+local-up: keys   ## build the image and start coordinator + 2 shards x 3 replicas in Docker
 	docker compose up --build -d
 
 local-down:      ## stop the local cluster (add -v to docker compose down to wipe data)
@@ -133,7 +137,7 @@ rebuild-replica: ## wipe one local replica and resync it from its leader (R=1b)
 	docker compose up -d r$(R)
 
 smoke:           ## the four operations against a running coordinator (BASE=http://...)
-	scripts/smoke.sh $(or $(BASE),http://localhost:8080)
+	KV_API_KEY=$$(cat secrets/ops.key 2>/dev/null) scripts/smoke.sh $(or $(BASE),http://localhost:8080)
 
 # --- M2: releases and the app in AWS (ADR-0009, ADR-0014) --------------------------------
 
@@ -204,7 +208,7 @@ smoke-aws:       ## smoke test on the coordinator via SSM: every node must run V
 	  sleep 10; done; \
 	cmd=$$($(AWS) ssm send-command --instance-ids $$id --document-name AWS-RunShellScript \
 	  --comment "capstone-kv smoke $$ver" \
-	  --parameters "commands=[\"aws s3 cp s3://$(BUCKET)/releases/$$ver/smoke.sh /tmp/smoke.sh --region $(REGION)\",\"bash /tmp/smoke.sh http://localhost:8080 $$ver\"]" \
+	  --parameters "commands=[\"aws s3 cp s3://$(BUCKET)/releases/$$ver/smoke.sh /tmp/smoke.sh --region $(REGION)\",\"export KV_API_KEY=\$$(aws secretsmanager get-secret-value --secret-id velmakina-kv/ops-key --query SecretString --output text --region $(REGION))\",\"bash /tmp/smoke.sh http://localhost:8080 $$ver\"]" \
 	  --query Command.CommandId --output text); \
 	$(AWS) ssm wait command-executed --command-id $$cmd --instance-id $$id || true; \
 	$(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$id --query StandardOutputContent --output text; \
@@ -225,7 +229,7 @@ smoke-replica:   ## smoke test with one follower per shard down (stops and resta
 	onCoord() { \
 	  cmd=$$($(AWS) ssm send-command --instance-ids $$coord --document-name AWS-RunShellScript \
 	    --comment "capstone-kv smoke-replica $$ver $$1" \
-	    --parameters "commands=[\"aws s3 cp $$script /tmp/smoke-replica.sh --quiet --region $(REGION)\",\"bash /tmp/smoke-replica.sh http://localhost:8080 $$*\"]" \
+	    --parameters "commands=[\"aws s3 cp $$script /tmp/smoke-replica.sh --quiet --region $(REGION)\",\"export KV_API_KEY=\$$(aws secretsmanager get-secret-value --secret-id velmakina-kv/ops-key --query SecretString --output text --region $(REGION))\",\"bash /tmp/smoke-replica.sh http://localhost:8080 $$*\"]" \
 	    --query Command.CommandId --output text); \
 	  for i in $$(seq 100); do \
 	    st=$$($(AWS) ssm get-command-invocation --command-id $$cmd --instance-id $$coord --query Status --output text 2>/dev/null || echo Pending); \
@@ -249,6 +253,33 @@ smoke-replica:   ## smoke test with one follower per shard down (stops and resta
 	start; \
 	onCoord up $$host; \
 	echo "smoke-replica passed"
+
+# secrets (lab session, a write call): creates or updates the three API-key secrets from
+# the files `make keys` made (ADR-0027). Values go through file:// so they never appear on
+# a command line or in this output.
+secrets:         ## create/update velmakina-kv/api-keys, ops-key, probe-key from secrets/ (author approves)
+	@set -euo pipefail; \
+	for pair in api-keys:secrets/api-keys.json ops-key:secrets/ops.key probe-key:secrets/probe.key; do \
+	  name=velmakina-kv/$${pair%%:*} file=$${pair#*:}; \
+	  test -s "$$file" || { echo "$$file missing: run make keys"; exit 1; }; \
+	  if $(AWS) secretsmanager describe-secret --secret-id $$name >/dev/null 2>&1; then \
+	    $(AWS) secretsmanager put-secret-value --secret-id $$name --secret-string file://$$file >/dev/null; echo "updated $$name"; \
+	  else \
+	    $(AWS) secretsmanager create-secret --name $$name --secret-string file://$$file --tags Key=Project,Value=capstone-kv >/dev/null; echo "created $$name"; \
+	  fi; \
+	done
+
+# rotate-keys: after `make secrets` with changed keys, refresh the coordinator's keys file
+# through SSM; the coordinator reloads it within seconds, no restart (ADR-0027).
+rotate-keys:     ## refresh the coordinator's API keys from Secrets Manager
+	@set -euo pipefail; \
+	id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='CoordinatorInstanceId'].OutputValue" --output text); \
+	f=/var/lib/kv/coordinator/keys/api-keys.json; \
+	cmd=$$($(AWS) ssm send-command --instance-ids $$id --document-name AWS-RunShellScript --comment "capstone-kv rotate keys" \
+	  --parameters "commands=[\"aws secretsmanager get-secret-value --secret-id velmakina-kv/api-keys --query SecretString --output text --region $(REGION) > $$f.new\",\"chown 65532:65532 $$f.new\",\"mv $$f.new $$f\"]" \
+	  --query Command.CommandId --output text); \
+	$(AWS) ssm wait command-executed --command-id $$cmd --instance-id $$id; \
+	echo "keys file refreshed on $$id"
 
 # bench-aws: needs the app stack with BENCH=true. Builds kvbench for the client (amd64),
 # uploads it with the workload files and scripts/bench.sh to s3://<bucket>/bench/<sha>/,

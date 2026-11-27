@@ -7,14 +7,29 @@ info:
     read, check and delete its items. Internal shard endpoints (/internal/v1/...) are
     not part of this contract.
 
+    Every request except /health needs an API key, `Authorization: Bearer <key>`, whose
+    scopes allow it: read (GET, HEAD, table lists), write (PUT on items), delete (DELETE
+    on items), admin (creating tables) (ADR-0027). Every answer carries `X-Request-ID`:
+    the client's own, or one the coordinator made; it names the request in the logs.
+
+    Versions (ADR-0028): every write is stamped by the shard's leader with a hybrid
+    logical clock; the stamp comes back in `X-KV-Timestamp` (also on a 504) and as the
+    `ETag`. A retry that sends the stamp back in `X-KV-Timestamp` loses to any newer
+    write to the key (last-write-wins: 200 with `X-KV-Superseded: true`). `If-Match`
+    and `If-None-Match: *` make a write conditional (412 when the condition fails).
+
 servers:
   - url: http://localhost:8080
+
+security:
+  - ApiKey: []
 
 paths:
   /health:
     get:
       summary: Whether the node can serve requests
       operationId: health
+      security: []
       responses:
         "200":
           description: Healthy
@@ -45,6 +60,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TableDefinition" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "409":
           description: A table with this name already exists
           content:
@@ -61,6 +78,8 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/TableDefinition" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /v1/tables/{table}:
     parameters:
@@ -74,6 +93,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TableDefinition" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # Tables without a sort key: the item is addressed by its partition key alone.
@@ -104,23 +125,69 @@ components:
       description: Sort key value. Distinguishes items inside one partition; not hashed.
       schema: { type: string, minLength: 1, maxLength: 1024 }
 
+    Stamp:
+      name: X-KV-Timestamp
+      in: header
+      required: false
+      description: >-
+        A stamp the store returned for an earlier attempt of this write (a retry after
+        504). The write then loses to any newer write to the key (last-write-wins). A
+        stamp more than 5 s ahead of the leader's clock is refused with 400.
+      schema: { type: string, pattern: "^[0-9]+$" }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: Apply only if the item's current ETag is this one; 412 otherwise.
+      schema: { type: string }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: "`*`: create only; 412 if the item exists."
+      schema: { type: string, enum: ["*"] }
+
+  headers:
+    Stamp:
+      description: The record's hybrid logical clock stamp (ADR-0028)
+      schema: { type: string, pattern: "^[0-9]+$" }
+    ETag:
+      description: The record's version, its stamp in quotes; send it back in If-Match
+      schema: { type: string }
+    Superseded:
+      description: "`true` when the write lost to a newer write to the key and was not stored"
+      schema: { type: string, enum: ["true"] }
+
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      description: An API key; its scopes decide what it may do (ADR-0027)
+
   pathItems:
     ItemByPartitionKey:
       parameters:
         - $ref: "#/components/parameters/Table"
         - $ref: "#/components/parameters/PartitionKey"
       put:
-        summary: CREATE — put an item (creates or replaces; idempotent)
+        summary: "CREATE — put an item (creates or replaces; If-None-Match: * creates only)"
         operationId: putItem
+        parameters:
+          - $ref: "#/components/parameters/Stamp"
+          - $ref: "#/components/parameters/IfMatch"
+          - $ref: "#/components/parameters/IfNoneMatch"
         requestBody:
           required: true
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Item" }
         responses:
-          "200": { description: Stored }
+          "200": { $ref: "#/components/responses/Written" }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
+          "412": { $ref: "#/components/responses/PreconditionFailed" }
           "503": { $ref: "#/components/responses/Unavailable" }
           "504": { $ref: "#/components/responses/NotCommitted" }
       get:
@@ -128,11 +195,16 @@ components:
         operationId: getItem
         responses:
           "200":
-            description: The item
+            description: The item, with its version
+            headers:
+              ETag: { $ref: "#/components/headers/ETag" }
+              X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
             content:
               application/json:
                 schema: { $ref: "#/components/schemas/Item" }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
       head:
@@ -141,15 +213,23 @@ components:
         responses:
           "200": { description: Present }
           "400": { description: Wrong key shape for this table }
+          "401": { description: No valid API key }
+          "403": { description: The key lacks the read scope }
           "404": { description: Absent, or the table doesn't exist }
           "503": { description: The owning shard is unavailable }
       delete:
         summary: DELETE — remove an item
         operationId: deleteItem
+        parameters:
+          - $ref: "#/components/parameters/Stamp"
+          - $ref: "#/components/parameters/IfMatch"
         responses:
           "204": { description: Deleted }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
+          "412": { $ref: "#/components/responses/PreconditionFailed" }
           "503": { $ref: "#/components/responses/Unavailable" }
           "504": { $ref: "#/components/responses/NotCommitted" }
     ItemByFullKey:
@@ -158,17 +238,24 @@ components:
         - $ref: "#/components/parameters/PartitionKey"
         - $ref: "#/components/parameters/SortKey"
       put:
-        summary: CREATE — put an item (creates or replaces; idempotent)
+        summary: "CREATE — put an item (creates or replaces; If-None-Match: * creates only)"
         operationId: putItemWithSortKey
+        parameters:
+          - $ref: "#/components/parameters/Stamp"
+          - $ref: "#/components/parameters/IfMatch"
+          - $ref: "#/components/parameters/IfNoneMatch"
         requestBody:
           required: true
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Item" }
         responses:
-          "200": { description: Stored }
+          "200": { $ref: "#/components/responses/Written" }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
+          "412": { $ref: "#/components/responses/PreconditionFailed" }
           "503": { $ref: "#/components/responses/Unavailable" }
           "504": { $ref: "#/components/responses/NotCommitted" }
       get:
@@ -176,11 +263,16 @@ components:
         operationId: getItemWithSortKey
         responses:
           "200":
-            description: The item
+            description: The item, with its version
+            headers:
+              ETag: { $ref: "#/components/headers/ETag" }
+              X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
             content:
               application/json:
                 schema: { $ref: "#/components/schemas/Item" }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
           "503": { $ref: "#/components/responses/Unavailable" }
       head:
@@ -189,24 +281,58 @@ components:
         responses:
           "200": { description: Present }
           "400": { description: Wrong key shape for this table }
+          "401": { description: No valid API key }
+          "403": { description: The key lacks the read scope }
           "404": { description: Absent, or the table doesn't exist }
           "503": { description: The owning shard is unavailable }
       delete:
         summary: DELETE — remove an item
         operationId: deleteItemWithSortKey
+        parameters:
+          - $ref: "#/components/parameters/Stamp"
+          - $ref: "#/components/parameters/IfMatch"
         responses:
           "204": { description: Deleted }
           "400": { $ref: "#/components/responses/BadRequest" }
+          "401": { $ref: "#/components/responses/Unauthorized" }
+          "403": { $ref: "#/components/responses/Forbidden" }
           "404": { $ref: "#/components/responses/NotFound" }
+          "412": { $ref: "#/components/responses/PreconditionFailed" }
           "503": { $ref: "#/components/responses/Unavailable" }
           "504": { $ref: "#/components/responses/NotCommitted" }
 
   responses:
+    Written:
+      description: >-
+        Stored, or (with `X-KV-Superseded: true`) not stored because a newer write to the
+        key won.
+      headers:
+        X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        X-KV-Superseded: { $ref: "#/components/headers/Superseded" }
     NotCommitted:
       description: >-
         The write reached the shard's leader but no other replica confirmed it within 2 s.
-        It may still take effect: the outcome is unknown, not failed (ADR-0021). Retrying
-        the same write is possible but can overwrite someone else's newer write.
+        It may still take effect: the outcome is unknown, not failed (ADR-0021). To retry
+        safely, send the returned `X-KV-Timestamp` back: the retry then loses to any newer
+        write instead of overwriting it (ADR-0028).
+      headers:
+        X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No API key, or one the store doesn't know
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The API key lacks the scope this operation needs
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PreconditionFailed:
+      description: "`If-Match` or `If-None-Match` doesn't hold: the item changed, or exists"
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

@@ -101,10 +101,22 @@ paths:
         content:
           application/json:
             schema: { type: object }
+      parameters:
+        - { name: X-Request-ID, in: header, required: false, schema: { type: string }, description: The coordinator's request ID, logged with the LSN }
+        - { name: X-KV-Timestamp, in: header, required: false, schema: { type: string }, description: "A stamp the store returned earlier (retry): last-write-wins against the key's latest record (ADR-0028)" }
+        - { name: If-Match, in: header, required: false, schema: { type: string }, description: Apply only if the key's latest stamp is this }
+        - { name: If-None-Match, in: header, required: false, schema: { type: string, enum: ["*"] }, description: Apply only if the key has no live latest record }
       responses:
-        "200": { description: Committed (on W replicas' disks) }
+        "200":
+          description: >-
+            Committed (on W replicas' disks), or, with X-KV-Superseded, not stored because
+            the key's latest record has a higher stamp and has committed
+          headers:
+            X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
+            X-KV-Superseded: { description: "true when the write lost (last-write-wins)", schema: { type: string } }
         "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/NotLeader" }
+        "412": { description: "If-Match or If-None-Match doesn't hold", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "504": { $ref: "#/components/responses/NotCommitted" }
         "413":
           description: Value larger than 1 MiB
@@ -123,6 +135,8 @@ paths:
           headers:
             X-KV-Epoch: { $ref: "#/components/headers/VersionEpoch" }
             X-KV-LSN: { $ref: "#/components/headers/VersionLSN" }
+            X-KV-Timestamp: { $ref: "#/components/headers/Stamp" }
+            ETag: { description: The stamp in quotes, schema: { type: string } }
           content:
             application/json:
               schema: { type: object }
@@ -151,6 +165,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: No such key (nothing written) }
         "409": { $ref: "#/components/responses/NotLeader" }
+        "412": { description: "If-Match doesn't hold", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "504": { $ref: "#/components/responses/NotCommitted" }
         "500": { $ref: "#/components/responses/WriteFailed" }
 
@@ -234,6 +249,9 @@ components:
       properties:
         error: { type: string }
   headers:
+    Stamp:
+      description: The record's hybrid logical clock stamp (ADR-0028); also on a 504
+      schema: { type: string }
     VersionEpoch: { description: "the key's version: epoch", schema: { type: integer } }
     VersionLSN: { description: "the key's version: LSN", schema: { type: integer } }
   responses:
