@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
+
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
@@ -46,6 +48,7 @@ type Coordinator struct {
 	members *Membership
 	client  *http.Client // to the shards: keep-alive connections, short timeout
 	r       int          // replicas each read asks (R, ADR-0021)
+	metrics *coordMetrics
 }
 
 // New builds a coordinator. tables persists the registry; members tracks the replica
@@ -61,6 +64,7 @@ func New(tables *store.Store, members *Membership, r int) *Coordinator {
 			// instead of opening one per request.
 			Transport: &http.Transport{MaxIdleConns: 512, MaxIdleConnsPerHost: 256, IdleConnTimeout: 90 * time.Second},
 		},
+		metrics: newCoordMetrics(members),
 	}
 }
 
@@ -70,15 +74,17 @@ func (c *Coordinator) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", c.health)
 
-	mux.HandleFunc("POST /v1/tables", c.createTable)
-	mux.HandleFunc("GET /v1/tables", c.listTables)
-	mux.HandleFunc("GET /v1/tables/{table}", c.getTable)
+	// Public routes are observed: request ID, metrics, one log line each (ADR-0025, 0029).
+	table := func(*http.Request) string { return "table" }
+	mux.HandleFunc("POST /v1/tables", c.observe(table, c.createTable))
+	mux.HandleFunc("GET /v1/tables", c.observe(table, c.listTables))
+	mux.HandleFunc("GET /v1/tables/{table}", c.observe(table, c.getTable))
 
 	// Both key shapes go to the same handler; a "GET" pattern also serves HEAD (EXISTS).
 	for _, p := range []string{"/v1/tables/{table}/items/{pk}", "/v1/tables/{table}/items/{pk}/{sk}"} {
-		mux.HandleFunc("PUT "+p, c.item)
-		mux.HandleFunc("GET "+p, c.item)
-		mux.HandleFunc("DELETE "+p, c.item)
+		mux.HandleFunc("PUT "+p, c.observe(itemOp, c.item))
+		mux.HandleFunc("GET "+p, c.observe(itemOp, c.item))
+		mux.HandleFunc("DELETE "+p, c.observe(itemOp, c.item))
 	}
 
 	mux.HandleFunc("POST /internal/v1/replicas", c.heartbeat)
@@ -208,22 +214,27 @@ func (c *Coordinator) item(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ADR-0012: the shard is chosen by table + partition key; the sort key only names the item.
-	routing, path := ring.RoutingKey(name, pk), shard.KeyPath(shard.StorageKey(name, pk, sk))
+	storageKey := shard.StorageKey(name, pk, sk)
+	routing, path := ring.RoutingKey(name, pk), shard.KeyPath(storageKey)
+	ri := info(r)
+	ri.keyHash = strconv.FormatUint(xxhash.Sum64String(storageKey), 16)
 	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		c.write(w, r.Method, routing, path, body)
+		c.write(w, ri, r.Method, routing, path, body)
 	} else {
-		c.read(w, r.Method, routing, path)
+		c.read(w, ri, r.Method, routing, path)
 	}
 }
 
 // write sends a put or delete to the shard's leader and relays the answer (ADR-0021).
-func (c *Coordinator) write(w http.ResponseWriter, method string, routing []byte, path string, body []byte) {
+func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, method string, routing []byte, path string, body []byte) {
 	id, addr, ok := c.members.WriteTarget(routing)
+	ri.shard = id
 	if !ok {
 		c.fail(w, id, http.StatusServiceUnavailable, "shard "+id+" has no live leader")
 		return
 	}
 	req, _ := http.NewRequest(method, addr+path, bytes.NewReader(body))
+	req.Header.Set(httpx.HeaderRequestID, ri.id)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		// Alive by heartbeat but not answering: same honest answer, try later.
@@ -256,23 +267,30 @@ type answer struct {
 // read asks R live replicas of the shard (rotating, ADR-0021) and returns the answer
 // with the newest version; a tombstone or "never had it" is 404. A replica that doesn't
 // answer is replaced by the next live one; fewer than R answers is 503.
-func (c *Coordinator) read(w http.ResponseWriter, method string, routing []byte, path string) {
+func (c *Coordinator) read(w http.ResponseWriter, ri *reqInfo, method string, routing []byte, path string) {
 	id, addrs := c.members.ReadTargets(routing)
+	ri.shard = id
 	var answers []answer
 	for len(answers) < c.r && len(addrs) > 0 {
 		n := min(c.r-len(answers), len(addrs))
 		batch := addrs[:n]
 		addrs = addrs[n:]
 		got := make([]*answer, n)
+		took := make([]time.Duration, n)
 		var wg sync.WaitGroup
 		for i, addr := range batch {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				got[i] = c.ask(method, addr+path)
+				start := time.Now()
+				got[i] = c.ask(ri.id, method, addr+path)
+				took[i] = time.Since(start)
 			}()
 		}
 		wg.Wait()
+		for i, addr := range batch {
+			ri.replicas = append(ri.replicas, fmt.Sprintf("%s=%.1fms", nodeOf(addr)+portOf(addr), float64(took[i].Microseconds())/1000))
+		}
 		for _, a := range got {
 			if a != nil {
 				answers = append(answers, *a)
@@ -305,8 +323,9 @@ func (c *Coordinator) read(w http.ResponseWriter, method string, routing []byte,
 }
 
 // ask reads one replica; nil means it didn't give a usable answer.
-func (c *Coordinator) ask(method, url string) *answer {
+func (c *Coordinator) ask(requestID, method, url string) *answer {
 	req, _ := http.NewRequest(method, url, nil)
+	req.Header.Set(httpx.HeaderRequestID, requestID)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil

@@ -20,10 +20,12 @@ type fakeReplica struct {
 	body    string
 	version store.Version // zero = no version headers (never had the key)
 	reads   atomic.Int64
+	lastID  atomic.Value // the X-Request-ID of the last request
 }
 
 func (f *fakeReplica) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.reads.Add(1)
+	f.lastID.Store(r.Header.Get("X-Request-ID"))
 	if f.version != (store.Version{}) {
 		w.Header().Set(shard.HeaderEpoch, strconv.FormatUint(f.version.Epoch, 10))
 		w.Header().Set(shard.HeaderLSN, strconv.FormatUint(f.version.LSN, 10))

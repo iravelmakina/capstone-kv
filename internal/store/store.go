@@ -448,6 +448,13 @@ func (s *Store) ReadAfter(lsn uint64, max int) ([]byte, int, error) {
 	return b, int(upto - lsn), nil
 }
 
+// Size returns the log's length in bytes.
+func (s *Store) Size() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.end
+}
+
 // Last returns the version and hash of the last record (zeros for an empty log).
 func (s *Store) Last() (Version, uint64) {
 	s.mu.RLock()

@@ -1,0 +1,160 @@
+package coordinator
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/iravelmakina/capstone-kv/internal/httpx"
+	"github.com/iravelmakina/capstone-kv/internal/metrics"
+)
+
+// reqInfo is what the handlers learn about a request while serving it, read back by
+// observe for the metrics and the log line (ADR-0025, ADR-0029).
+type reqInfo struct {
+	id        string
+	principal string   // the API key's name; "-" before authentication
+	shard     string   // the shard the item belongs to, once routed
+	keyHash   string   // a hash of the storage key, never the key itself
+	replicas  []string // reads: "1a=2.1ms" per replica asked
+}
+
+type infoKey struct{}
+
+// info returns the request's reqInfo; requests that didn't pass through observe get an
+// empty one, so handlers never have to check.
+func info(r *http.Request) *reqInfo {
+	if ri, ok := r.Context().Value(infoKey{}).(*reqInfo); ok {
+		return ri
+	}
+	return &reqInfo{principal: "-"}
+}
+
+// coordMetrics are the coordinator's own series.
+type coordMetrics struct {
+	reg      *metrics.Registry
+	requests *metrics.CounterVec   // kv_requests_total{op,code,shard,principal}
+	latency  *metrics.HistogramVec // kv_request_duration_seconds{op,shard}
+}
+
+func newCoordMetrics(m *Membership) *coordMetrics {
+	reg := metrics.New()
+	cm := &coordMetrics{
+		reg: reg,
+		requests: reg.Counter("kv_requests_total",
+			"Public API requests by operation, status code, shard and API key name.", "op", "code", "shard", "principal"),
+		latency: reg.Histogram("kv_request_duration_seconds",
+			"Public API request latency at the coordinator, by operation and shard.", metrics.LatencyBuckets, "op", "shard"),
+	}
+	reg.GaugeFunc("kv_replica_up", "1 if the replica has sent a heartbeat within the timeout.",
+		[]string{"shard", "replica", "node"}, func() []metrics.Sample {
+			var out []metrics.Sample
+			for _, s := range m.Status() {
+				for _, r := range s.Replicas {
+					out = append(out, metrics.Sample{Labels: []string{s.ID, r.ID, nodeOf(r.Address)}, Value: boolValue(r.Available)})
+				}
+			}
+			return out
+		})
+	reg.GaugeFunc("kv_shard_has_leader", "1 if the shard has a leader that is alive.",
+		[]string{"shard"}, func() []metrics.Sample {
+			var out []metrics.Sample
+			for _, s := range m.Status() {
+				alive := false
+				for _, r := range s.Replicas {
+					alive = alive || (r.ID == s.Leader && r.Available)
+				}
+				out = append(out, metrics.Sample{Labels: []string{s.ID}, Value: boolValue(alive)})
+			}
+			return out
+		})
+	reg.GaugeFunc("kv_shard_leader_epoch", "The shard's current leader epoch; a step is a leader change.",
+		[]string{"shard", "leader"}, func() []metrics.Sample {
+			var out []metrics.Sample
+			for _, s := range m.Status() {
+				out = append(out, metrics.Sample{Labels: []string{s.ID, s.Leader}, Value: float64(s.Epoch)})
+			}
+			return out
+		})
+	reg.GaugeFunc("kv_replica_last_lsn", "The last LSN each replica reported in its heartbeat.",
+		[]string{"shard", "replica"}, func() []metrics.Sample {
+			var out []metrics.Sample
+			for _, s := range m.Status() {
+				for _, r := range s.Replicas {
+					out = append(out, metrics.Sample{Labels: []string{s.ID, r.ID}, Value: float64(r.Last.LSN)})
+				}
+			}
+			return out
+		})
+	reg.AddRuntime()
+	return cm
+}
+
+// nodeOf is the host part of a replica's address: replicas on the same instance share it,
+// which is how alerts tell a node down from one replica down (ADR-0020 placement).
+func nodeOf(address string) string {
+	if u, err := url.Parse(address); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return address
+}
+
+// portOf is ":8081" for a replica address, so a log line tells two replicas on one node apart.
+func portOf(address string) string {
+	if u, err := url.Parse(address); err == nil && u.Port() != "" {
+		return ":" + u.Port()
+	}
+	return ""
+}
+
+func boolValue(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// itemOp names an item request's operation for metrics and logs.
+func itemOp(r *http.Request) string {
+	switch r.Method {
+	case http.MethodPut:
+		return "write"
+	case http.MethodDelete:
+		return "delete"
+	case http.MethodHead:
+		return "exists"
+	}
+	return "read"
+}
+
+// observe wraps a public route: it gives the request an ID (returned to the client), and
+// afterwards counts it, records its latency and logs one JSON line about it.
+func (c *Coordinator) observe(op func(*http.Request) string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ri := &reqInfo{id: httpx.RequestID(r), principal: "-"}
+		w.Header().Set(httpx.HeaderRequestID, ri.id)
+		rec := &httpx.StatusRecorder{ResponseWriter: w}
+		h(rec, r.WithContext(context.WithValue(r.Context(), infoKey{}, ri)))
+
+		name, code, took := op(r), rec.Code(), time.Since(start)
+		c.metrics.requests.With(name, strconv.Itoa(code), ri.shard, ri.principal).Inc()
+		c.metrics.latency.With(name, ri.shard).Observe(took.Seconds())
+		attrs := []any{"request_id", ri.id, "principal", ri.principal, "op", name, "status", code,
+			"duration_ms", float64(took.Microseconds()) / 1000}
+		if ri.shard != "" {
+			attrs = append(attrs, "shard", ri.shard, "key_hash", ri.keyHash)
+		}
+		if len(ri.replicas) > 0 {
+			attrs = append(attrs, "replicas", strings.Join(ri.replicas, ","))
+		}
+		slog.Info("request", attrs...)
+	}
+}
+
+// MetricsHandler serves the coordinator's metrics, on the metrics port (ADR-0025).
+func (c *Coordinator) MetricsHandler() http.Handler { return c.metrics.reg.Handler() }

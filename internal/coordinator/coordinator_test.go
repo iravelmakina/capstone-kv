@@ -28,6 +28,7 @@ type node struct {
 // like the deployment. Heartbeats are sent by beat(), not by timers, so tests control them.
 type cluster struct {
 	coord   *httptest.Server
+	obj     *Coordinator
 	members *Membership
 	leaders *store.Store
 	nodes   map[string]*node // replica ID ("1a", "2c", ...) -> node
@@ -71,7 +72,8 @@ func (c *cluster) startCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.members = members
-	c.coord = httptest.NewServer(New(openStore(t), members, 2).Handler())
+	c.obj = New(openStore(t), members, 2)
+	c.coord = httptest.NewServer(c.obj.Handler())
 	t.Cleanup(c.coord.Close)
 }
 

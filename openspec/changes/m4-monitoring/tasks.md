@@ -11,12 +11,12 @@
 
 ## 2. Metrics and logs in the code
 
-- [ ] 2.1 `internal/metrics`: counters, gauges and fixed-bucket histograms in the Prometheus text format, Go runtime metrics (standard library only)
-- [ ] 2.2 Metrics on a separate listener: coordinator 9180, replicas on their API port + 1100 (9181/9182)
-- [ ] 2.3 Coordinator: `kv_requests_total{op,code,shard,principal}`, `kv_request_duration_seconds{op,shard}`, replica (with `node`) and leader gauges, last LSNs
-- [ ] 2.4 Replica: request histogram and errors by operation, role, keys, log bytes, reads; leader: commit wait, each follower's acked LSN and lag seconds
-- [ ] 2.5 JSON logs (`log/slog`): `X-Request-ID` taken or made by the coordinator, passed to replicas, returned; the leader logs request ID ↔ LSN, followers the LSN ranges they append; the coordinator logs each replica's time on reads; no values or keys
-- [ ] 2.6 Tests: metric names and labels, histogram buckets against hand-computed values, request ID passed through, follower lag on the leader
+- [x] 2.1 `internal/metrics`: counters, gauges and fixed-bucket histograms in the Prometheus text format, Go runtime metrics (standard library only)
+- [x] 2.2 Metrics on a separate listener: coordinator 9180, replicas on their API port + 1100 (9181/9182)
+- [x] 2.3 Coordinator: `kv_requests_total{op,code,shard,principal}`, `kv_request_duration_seconds{op,shard}`, replica (with `node`) and leader gauges, last LSNs
+- [x] 2.4 Replica: request histogram and errors by operation, role, keys, log bytes, reads; leader: commit wait, each follower's acked LSN and lag seconds
+- [x] 2.5 JSON logs (`log/slog`): `X-Request-ID` taken or made by the coordinator, passed to replicas, returned; the leader logs request ID ↔ LSN, followers the LSN ranges they append; the coordinator logs each replica's time on reads; no values or keys
+- [x] 2.6 Tests: metric names and labels, histogram buckets against hand-computed values, request ID passed through, follower lag on the leader
 
 ## 3. Record versions
 

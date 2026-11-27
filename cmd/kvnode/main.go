@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -54,6 +55,7 @@ func envDuration(name string, def time.Duration) time.Duration {
 func main() {
 	role := flag.String("role", env("KV_ROLE", ""), "coordinator or shard")
 	listen := flag.String("listen", env("KV_LISTEN", ":8080"), "address to serve HTTP on")
+	metricsListen := flag.String("metrics-listen", env("KV_METRICS_LISTEN", ":9180"), "address to serve /metrics on, apart from the API (ADR-0025)")
 	dataDir := flag.String("data-dir", env("KV_DATA_DIR", "/data"), "directory for the append-only log")
 
 	w := flag.Int("w", envInt("KV_W", 2), "replicas a write needs before it commits: 1 or 2 (ADR-0021)")
@@ -76,11 +78,19 @@ func main() {
 		log.Fatal("--w must be 1 or 2")
 	}
 
+	// JSON logs (ADR-0029). SetDefault also sends the log package's lines through this
+	// handler, so every line of the process is JSON with its role and identity.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("role", *role)
+	if *role == "shard" {
+		logger = logger.With("shard", *shardID, "replica", *replicaID)
+	}
+	slog.SetDefault(logger)
+
 	// Stop cleanly on Ctrl-C or `docker stop` (SIGTERM): finish requests, close the log.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var handler http.Handler
+	var handler, metricsHandler http.Handler
 	var closeStore func() error
 	switch *role {
 	case "coordinator":
@@ -103,7 +113,8 @@ func main() {
 		go members.Watch(ctx, time.Second)
 		// R + W > N: with W = 2 two replicas answer each read, with W = 1 all of them (ADR-0021).
 		r := *replicas + 1 - *w
-		handler = coordinator.New(tables, members, r).Handler()
+		coord := coordinator.New(tables, members, r)
+		handler, metricsHandler = coord.Handler(), coord.MetricsHandler()
 		log.Printf("coordinator: %d shards × %d replicas, W=%d R=%d, %d virtual nodes", *expected, *replicas, *w, r, *vnodes)
 
 	case "shard":
@@ -116,7 +127,7 @@ func main() {
 		}
 		closeStore = st.Close
 		rep := shard.NewReplica(st, shard.Config{Shard: *shardID, Replica: *replicaID, W: *w})
-		handler = rep.Handler()
+		handler, metricsHandler = rep.Handler(), rep.MetricsHandler()
 		go rep.Run(ctx)
 		go rep.HeartbeatLoop(ctx, *coordURL, *advertise, *interval)
 		last, _ := st.Last()
@@ -128,13 +139,22 @@ func main() {
 	}
 
 	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", metricsHandler)
+	metricsSrv := &http.Server{Addr: *metricsListen, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("metrics listener: %v", err)
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		metricsSrv.Shutdown(shutdown)
 		srv.Shutdown(shutdown)
 	}()
-	log.Printf("listening on %s", *listen)
+	log.Printf("listening on %s, metrics on %s", *listen, *metricsListen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

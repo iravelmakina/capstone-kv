@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -71,17 +72,20 @@ type Replica struct {
 	st   *store.Store
 	http *http.Client
 
-	mu         sync.Mutex
-	epoch      uint64            // the newest epoch this replica has heard of
-	leaderID   string            // the leader of that epoch
-	leaderAddr string            // and its base URL
-	acked      map[string]uint64 // leader: each follower's durable LSN, from its pulls
-	commit     uint64            // leader: highest committed LSN
-	applied    uint64            // leader: highest LSN applied to the map
-	leaderLast uint64            // follower: the leader's last LSN at the latest pull
-	changed    chan struct{}     // closed and replaced on every change (record, ack, role)
-	waits      latencies         // leader: commit-wait times
-	reads      atomic.Uint64     // reads served (GET and HEAD), to show reads spread out
+	mu          sync.Mutex
+	epoch       uint64               // the newest epoch this replica has heard of
+	leaderID    string               // the leader of that epoch
+	leaderAddr  string               // and its base URL
+	acked       map[string]uint64    // leader: each follower's durable LSN, from its pulls
+	commit      uint64               // leader: highest committed LSN
+	applied     uint64               // leader: highest LSN applied to the map
+	leaderLast  uint64               // follower: the leader's last LSN at the latest pull
+	changed     chan struct{}        // closed and replaced on every change (record, ack, role)
+	waits       latencies            // leader: commit-wait times
+	reads       atomic.Uint64        // reads served (GET and HEAD), to show reads spread out
+	caughtUp    map[string]time.Time // leader: when each follower last held the leader's last record
+	leaderSince time.Time            // leader: when this replica became leader of the epoch
+	metrics     *replicaMetrics
 
 	onPull func(replica string, lsn uint64) // tests: called on every pull the leader serves; guarded by mu
 }
@@ -89,14 +93,17 @@ type Replica struct {
 // NewReplica wraps an opened store. Until SetRole names a leader it accepts no writes.
 func NewReplica(st *store.Store, cfg Config) *Replica {
 	last, _ := st.Last()
-	return &Replica{
+	r := &Replica{
 		cfg: cfg.withDefaults(), st: st,
-		http:    &http.Client{},
-		acked:   map[string]uint64{},
-		commit:  last.LSN, // everything replay put in the map counts as applied
-		applied: last.LSN,
-		changed: make(chan struct{}),
+		http:     &http.Client{},
+		acked:    map[string]uint64{},
+		caughtUp: map[string]time.Time{},
+		commit:   last.LSN, // everything replay put in the map counts as applied
+		applied:  last.LSN,
+		changed:  make(chan struct{}),
 	}
+	r.initMetrics()
+	return r
 }
 
 // NewStandalone is a replica set of one: leader of epoch 1, writes commit on its own disk.
@@ -132,6 +139,8 @@ func (r *Replica) SetRole(epoch uint64, leaderID, leaderAddr string) {
 	wasLeader := r.isLeaderLocked()
 	r.epoch, r.leaderID, r.leaderAddr = epoch, leaderID, leaderAddr
 	r.acked = map[string]uint64{}
+	r.caughtUp = map[string]time.Time{}
+	r.leaderSince = time.Now()
 	last, _ := r.st.Last()
 	switch {
 	case r.isLeaderLocked():
@@ -181,8 +190,8 @@ func (r *Replica) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", r.health)
 	// A "GET" pattern also matches HEAD requests; the handler tells them apart.
-	mux.HandleFunc("GET /internal/v1/kv/{key}", r.read)
-	mux.HandleFunc("PUT /internal/v1/kv/{key}", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("GET /internal/v1/kv/{key}", r.observe("read", r.read))
+	mux.HandleFunc("PUT /internal/v1/kv/{key}", r.observe("write", func(w http.ResponseWriter, req *http.Request) {
 		key, ok := decodeKey(w, req)
 		if !ok {
 			return
@@ -193,8 +202,8 @@ func (r *Replica) Handler() http.Handler {
 			return
 		}
 		r.write(w, req, store.OpPut, key, body, http.StatusOK)
-	})
-	mux.HandleFunc("DELETE /internal/v1/kv/{key}", func(w http.ResponseWriter, req *http.Request) {
+	}))
+	mux.HandleFunc("DELETE /internal/v1/kv/{key}", r.observe("delete", func(w http.ResponseWriter, req *http.Request) {
 		key, ok := decodeKey(w, req)
 		if !ok {
 			return
@@ -204,8 +213,8 @@ func (r *Replica) Handler() http.Handler {
 			return
 		}
 		r.write(w, req, store.OpDelete, key, nil, http.StatusNoContent)
-	})
-	mux.HandleFunc("GET /internal/v1/log", r.serveLog)
+	}))
+	mux.HandleFunc("GET /internal/v1/log", r.observe("log", r.serveLog))
 	return mux
 }
 
@@ -262,6 +271,14 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 	}
 	r.mu.Unlock()
 
+	// One log line per write on the leader: the request ID next to the LSN it got, so the
+	// followers' lines (which name LSN ranges) can be found from the coordinator's (ADR-0029).
+	done := func(status int) {
+		wait := time.Since(start)
+		r.metrics.commitWait.With().Observe(wait.Seconds())
+		slog.Info("write", "request_id", req.Header.Get(httpx.HeaderRequestID), "op", opName(op),
+			"epoch", epoch, "lsn", rec.LSN, "status", status, "commit_wait_ms", float64(wait.Microseconds())/1000)
+	}
 	timeout := time.NewTimer(r.cfg.CommitTimeout)
 	defer timeout.Stop()
 	for {
@@ -275,9 +292,11 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 		r.mu.Unlock()
 		switch {
 		case committed:
+			done(okStatus)
 			w.WriteHeader(okStatus)
 			return
 		case !stillLeader:
+			done(http.StatusGatewayTimeout)
 			httpx.WriteError(w, http.StatusGatewayTimeout, "not committed: leadership changed; outcome unknown")
 			return
 		}
@@ -287,6 +306,7 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 			r.mu.Lock()
 			r.waits.add(time.Since(start))
 			r.mu.Unlock()
+			done(http.StatusGatewayTimeout)
 			httpx.WriteError(w, http.StatusGatewayTimeout, fmt.Sprintf(
 				"not committed: no follower had it within %s; outcome unknown", r.cfg.CommitTimeout))
 			return
@@ -332,12 +352,19 @@ func (r *Replica) serveLog(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	leaderLast, _ := r.st.Last()
 	r.mu.Lock()
 	if lsn > r.acked[follower] {
 		r.acked[follower] = lsn
 		if r.cfg.W >= 2 {
 			r.advanceCommitLocked(lsn) // one follower is enough for W = 2 (ADR-0021)
 		}
+	}
+	if _, seen := r.acked[follower]; !seen {
+		r.acked[follower] = lsn // first pull in this epoch: show it even at LSN 0
+	}
+	if lsn >= leaderLast.LSN {
+		r.caughtUp[follower] = time.Now()
 	}
 	hook := r.onPull
 	r.mu.Unlock()
@@ -466,7 +493,14 @@ func (r *Replica) pullOnce(ctx context.Context, addr string) error {
 	if len(raw) == 0 {
 		return nil
 	}
-	return r.st.Replicate(raw) // checks checksums, gaps and the hash chain
+	before, _ := r.st.Last()
+	if err := r.st.Replicate(raw); err != nil { // checks checksums, gaps and the hash chain
+		return err
+	}
+	if after, _ := r.st.Last(); after.LSN > before.LSN {
+		slog.Info("appended", "from_lsn", before.LSN+1, "to_lsn", after.LSN, "epoch", after.Epoch)
+	}
+	return nil
 }
 
 // Status is what a replica reports about itself: to the coordinator (promotion reads it)
@@ -598,4 +632,11 @@ func (r *Replica) HeartbeatLoop(ctx context.Context, coordinatorURL, address str
 			send()
 		}
 	}
+}
+
+func opName(op byte) string {
+	if op == store.OpDelete {
+		return "delete"
+	}
+	return "write"
 }

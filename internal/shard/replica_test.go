@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -331,5 +333,53 @@ func TestHeartbeatTakesRoleFromTheAnswer(t *testing.T) {
 	}
 	if code := put(t, n, "k", `{}`); code != http.StatusGatewayTimeout {
 		t.Fatalf("leader without followers, W=2: put = %d, want 504", code)
+	}
+}
+
+// metricValue returns the value of the first series line starting with prefix.
+func metricValue(t *testing.T, n *node, prefix string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	n.r.MetricsHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			v, err := strconv.ParseFloat(line[strings.LastIndexByte(line, ' ')+1:], 64)
+			if err != nil {
+				t.Fatalf("bad line %q", line)
+			}
+			return v
+		}
+	}
+	return -1
+}
+
+// Spec "Lag visible on the leader": a stopped follower's lag grows on the leader, the
+// live one stays at 0; the leader also times its writes and commit waits.
+func TestFollowerLagOnLeader(t *testing.T) {
+	a, b, c := threeNodes(t)
+	if code := put(t, a, "k0", `{"v":0}`); code != 200 {
+		t.Fatalf("put = %d", code)
+	}
+	eventually(t, "followers caught up", func() bool { return lastLSN(b) == 1 && lastLSN(c) == 1 })
+	c.stop()
+	for i := 1; i <= 3; i++ {
+		put(t, a, fmt.Sprintf("k%d", i), `{"v":1}`)
+	}
+	time.Sleep(300 * time.Millisecond)
+	lagC := metricValue(t, a, `kv_follower_lag_seconds{shard="shard-1",replica="1a",follower="1c"}`)
+	if lagC < 0.2 {
+		t.Errorf("stopped follower's lag = %v s, want ≥ 0.2", lagC)
+	}
+	eventually(t, "live follower at 0 lag", func() bool {
+		return metricValue(t, a, `kv_follower_lag_seconds{shard="shard-1",replica="1a",follower="1b"}`) == 0
+	})
+	if n := metricValue(t, a, `kv_commit_wait_seconds_count{shard="shard-1",replica="1a"}`); n != 4 {
+		t.Errorf("commit waits counted %v, want 4", n)
+	}
+	if n := metricValue(t, a, `kv_replica_request_duration_seconds_count{shard="shard-1",replica="1a",op="write"}`); n != 4 {
+		t.Errorf("writes timed %v, want 4", n)
+	}
+	if v := metricValue(t, a, `kv_replica_role{shard="shard-1",replica="1a",role="leader"}`); v != 1 {
+		t.Errorf("role metric = %v", v)
 	}
 }
