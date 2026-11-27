@@ -17,7 +17,7 @@ func (r *Registry) AddRuntime() {
 	r.Gauge("go_heap_bytes", "Bytes of heap memory occupied by live and not-yet-freed objects.", func() float64 {
 		return readUint("/memory/classes/heap/objects:bytes")
 	})
-	r.Gauge("go_gc_cycles_total", "Completed GC cycles since the process started.", func() float64 {
+	r.CounterFunc("go_gc_cycles_total", "Completed GC cycles since the process started.", func() float64 {
 		return readUint("/gc/cycles/total:gc-cycles")
 	})
 	r.add(&gcPauses{bounds: []float64{0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1}})
