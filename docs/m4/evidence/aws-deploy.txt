@@ -1,4 +1,6 @@
-M4 deploy to AWS Academy (us-east-1) with monitoring, 2026-11-27 (times UTC).
+M4 deploy to AWS Academy (us-east-1) with monitoring, 2026-11-27 (times UTC), two lab
+sessions: session 1 (deploy, drills D1-D3, Loki) and session 2 (D1 under load,
+benchmark, `make down-app`).
 Releases eee86c664097, then d8f41f62a6bc (three fixes found in this session, below).
 Account IDs replaced with <ACCOUNT_ID>. Commands run from the laptop with profile academy;
 each write call approved by the author in chat. Checks on the instances through SSM; the
@@ -102,8 +104,8 @@ before: shard-1 leader 1b, shard-2 leader 2b (epoch 1); replicas up: 6; firing: 
      smoke-replica passed
    NodeDown resolved 0 s after smoke-replica finished (it waits for the node to catch up)
 # Alert times count from stop-instances: 15 s heartbeat timeout, then the 5 s scrape and
-# evaluation. No 5xx counter was read for this window (only the 10 puts, all 200); the
-# Prometheus data on the monitor still has it if the stack comes back.
+# evaluation. No 5xx counter was read for this window (only the 10 puts, all 200), and
+# the lab restart erased it (R1, session 2); D1 was repeated under load in session 2 (D1').
 
 ===== [D2] a leader node stopped under workload A (15:00:04) =====
    workload running: 162 req/s
@@ -195,11 +197,134 @@ SSM command bcf93a7a-a4a4-460c-9269-4f83384101c4 started 15:17:10 UTC; polling e
 #   aws ssm get-command-invocation --command-id bcf93a7a-a4a4-460c-9269-4f83384101c4 \
 #     --instance-id i-02de0a6beb7e3dfca
 # (SSM keeps command history for 30 days), or to run again.
+# Read in session 2: the command never ran. The lab had stopped the client before its
+# agent picked the command up; the agent got it at 18:18, when the lab started the
+# instances again, and it failed (list-commands: TimedOut, the 10-minute delivery timeout).
+# Rerun in session 2, below.
 
-===== Open after this session =====
-- Task 8.3 (benchmark with metrics) and 8.4 (`make down-app`): the app stack is still
-  there; the lab stopped its instances when the session ended.
-- Task 8.2's follower-node 5xx count (D1) not read.
-- D2 against ADR-0026 (above): the author decides on a superseding ADR.
+#############################################################################################
+Lab session 2, the same day: the lab started the stopped instances at 18:18. The app stack
+was the one from session 1 (release d8f41f62a6bc), not redeployed.
+
+===== [R1] what the restart kept and lost =====
+- Prometheus' oldest sample: 18:18:39. monitor-boot.sh runs on every boot and recreates
+  the containers (`docker rm -f`); Prometheus and Loki keep their data inside the
+  container, so a lab restart empties both. Session 1's metrics (D1's 5xx) were gone,
+  hence D1 again below. Inside one session nothing is lost.
+- Leaders after the restart: shard-1 1a (epoch 2, as D2 left it), shard-2 2a at
+  epoch 3: one more promotion while the nodes came back (D2 had left 2c leading at
+  epoch 2). Not looked into further; the logs of that moment went with the restart.
+- replicas up: 6; firing: Watchdog only; `make smoke-aws`: all 7 versions d8f41f62a6bc,
+  smoke test passed.
+
+===== [D1'] a follower node stopped under workload A (run phase) (18:24:18) =====
+Workload A (1 run, label drill-follower) started first; the node was stopped a minute
+into the run phase (reads and updates), so reads did meet the stopped replicas.
+   run phase (reads and updates): 967 req/s
+   stopping node i-00c98da23a578352b (10.20.103.159): one follower of each shard
+   stop-instances at 18:28:03
+   replicas on that node: 1c (shard-1), 2c (shard-2)
+   ReplicaDown firing after: 20 s
+   NodeDown firing after:    20 s
+   replicas up while it is down: 4 of 6
+   leaders while it is down: shard-1 1a (epoch 2), shard-2 2a (epoch 3)
+   smoke-replica output:
+     ok   every replica on 10.20.103.159 reported down
+     ok   10 puts committed and read back, then deleted, with 10.20.103.159 down
+     starting i-00c98da23a578352b
+     FAIL replicas on 10.20.103.159 not back and caught up after 120 s
+   5xx from just before the stop until the node was back (287s): 0
+   requests by op and code over that window:
+    {'code': '200', 'op': 'read'} 214641.15
+    {'code': '200', 'op': 'write'} 214103.02499999997
+    {'code': '204', 'op': 'delete'} 6.15   {'code': '409', 'op': 'table'} 1.025
+    (no other codes)
+   read p99 by shard over that window (s):
+    {'shard': 'shard-1'} 0.007926380409258648
+    {'shard': 'shard-2'} 0.007928951178191892
+   write p99 by shard over that window (s):
+    {'shard': 'shard-1'} 0.05300142192347468
+    {'shard': 'shard-2'} 0.05583367753355953
+   reads slower than 1 s over that window: 0
+   workload A during the drill (client): READ p99 10.3 ms, max 227 ms; UPDATE p99 38.1 ms
+     saved to bench-results/d8f41f62a6bc/20261127T183753Z-drill-follower.txt
+# - No 5xx and no read slower than 1 s with a node (one follower of each shard) stopped
+#   under load. ADR-0026 expected reads to wait out the 3 s client timeout until the node
+#   was marked down; that didn't happen (read max 227 ms), so on this point ADR-0026 is
+#   too pessimistic, not wrong.
+# - The FAIL is the check's, not the store's: smoke-replica.sh wants every replica on the
+#   node at its leader's last LSN for 6 polls in a row ("Nothing writes now", line 94),
+#   which can't hold under ~480 writes/s. Prometheus right after: both replicas up,
+#   follower lag 0.03-0.15 s. smoke-replica is meant for an idle cluster (D1, session 1).
+# - Write p99 53-56 ms at the coordinator is the histogram's estimate: there is no bucket
+#   between 30 and 60 ms (the SLO thresholds are bucket edges, internal/metrics/metrics.go),
+#   so any p99 in that range is interpolated. The client measured 38.1 ms. Whether p99 is
+#   above 60 ms (the alert) is exact; the value shown below it is not.
+
+===== [B'] workload A with metrics on, 3 runs (task 8.3) (18:37:55) =====
+   release d8f41f62a6bc, client i-02de0a6beb7e3dfca -> http://10.20.2.109:8080, workloads: a,
+   runs per workload: 3, label: m4-metrics, SSM status: Success
+   == load (18:39:13)   INSERT OPS 778.2, 99th(us) 41823
+   == workload a, run 1 (18:41:21)
+   READ   - Takes(s): 663.3, Count: 500176, OPS: 754.1, Avg(us): 3272, 95th(us): 5743, 99th(us): 9615
+   UPDATE - Takes(s): 663.3, Count: 499824, OPS: 753.6, Avg(us): 17846, 95th(us): 31695, 99th(us): 38463
+   TOTAL  - OPS: 1507.7
+   == workload a, run 2 (18:52:25)
+   READ   - Takes(s): 669.1, Count: 499933, OPS: 747.1, Avg(us): 3321, 95th(us): 5827, 99th(us): 11071
+   UPDATE - Takes(s): 669.1, Count: 500067, OPS: 747.4, Avg(us): 17975, 95th(us): 31935, 99th(us): 39263
+   TOTAL  - OPS: 1494.5
+   == workload a, run 3 (19:03:34)
+   READ   - Takes(s): 665.8, Count: 499832, OPS: 750.7, Avg(us): 3251, 95th(us): 5647, 99th(us): 9471
+   UPDATE - Takes(s): 665.8, Count: 500168, OPS: 751.2, Avg(us): 17930, 95th(us): 31775, 99th(us): 38527
+   TOTAL  - OPS: 1501.8
+   == done (19:14:40)
+   saved to bench-results/d8f41f62a6bc/20261127T191508Z-m4-metrics.txt and
+   s3://velmakina-kv-artifacts-<ACCOUNT_ID>/bench-results/d8f41f62a6bc/20261127T191508Z-m4-metrics.txt
+   cluster during the benchmark (Prometheus, 2185 s): no 5xx (3.1 M answered 200, 4 table
+   409s); read p99 7.7 ms on both shards; write p99 54-56 ms (interpolated, see D1');
+   alerts that fired: Watchdog only.
+
+Against M3 (docs/m3/benchmark.md; same settings: 100,000 records x 1 KB, 1,000,000 ops,
+16 threads, W = 2, R = 2, t3.small; median of 3 runs; ms):
+
+|                        | M3 session 1 | M3 session 2 (control) | M4, metrics on | M4 vs control |
+| ---------------------- | -----------: | ---------------------: | -------------: | ------------: |
+| Total, ops/s           |        1,542 |                  1,545 |          1,502 |         -2.8% |
+| READ avg / p95 / p99   | 2.79/4.52/10.26 |          2.56/4.07/6.56 | 3.27/5.74/9.62 | avg +0.71 ms |
+| UPDATE avg / p95 / p99 | 17.83/32.45/39.04 |     18.05/32.77/39.39 | 17.93/31.78/38.53 | p99 -2% |
+
+# - Writes: no cost; update avg and p99 within 2.2% of both M3 sessions.
+# - Reads: the average is 0.5-0.7 ms higher than in either M3 session, and p95 too, so
+#   that is a real cost per read. Read p99 (9.6 ms) lies between M3's two sessions
+#   (6.6 and 10.3 ms), inside the deployment-to-deployment spread, so no claim on p99.
+# - Throughput -3%, as expected from 16 closed-loop threads with slower reads.
+# - "Metrics on" is all of M4 against M3, not metrics alone: also the API-key check, a
+#   JSON log line per request and Alloy shipping it. They weren't measured separately.
+
+===== [T'] notifications sent by Alertmanager on the monitor (19:15:16) =====
+   alertmanager_notifications_failed_total{integration="telegram",reason="clientError"} 0
+   alertmanager_notifications_failed_total{integration="telegram",reason="contextCanceled"} 0
+   alertmanager_notifications_failed_total{integration="telegram",reason="contextDeadlineExceeded"} 0
+   alertmanager_notifications_failed_total{integration="telegram",reason="other"} 0
+   alertmanager_notifications_failed_total{integration="telegram",reason="serverError"} 0
+   alertmanager_notifications_total{integration="telegram"} 13
+# Since the restart at 18:18: ReplicaDown, NodeDown and their resolved, for D1'.
+
+===== [E] evidence exported, app stack deleted =====
+Everything above was read through SSM (port forwarding to Prometheus and Grafana, Run
+Command on the coordinator and the monitor) before the stack went.
+$ make down-app      (19:15:58)
+velmakina-kv-app deleted      (19:18:02)
+$ aws cloudformation list-stacks (velmakina-*, not deleted)
+velmakina-kv-artifacts	UPDATE_COMPLETE
+velmakina-kv-network	CREATE_COMPLETE
+
+===== Open after the lab =====
+- D2 against ADR-0026 (above): one node held both leaders, and the closed-loop client
+  turned 14.7 s of 503 into ~4.8% of the hour's requests. Whether to supersede ADR-0026
+  (or ADR-0020's leader placement) is the author's decision. D1' shows the other side of
+  it: a stopped follower node costs nothing.
 - The burn-rate alerts fire on a handful of errors at almost no traffic (S5): a
   minimum-traffic guard is a design change (ADR-0029), for the author to decide.
+- Prometheus and Loki lose their data on a lab restart (R1).
+- smoke-replica can't pass under write load (D1'); fine for its purpose, worth a comment.
