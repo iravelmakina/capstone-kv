@@ -643,7 +643,8 @@ type Status struct {
 	Last     store.Version `json:"last"`
 	Lag      uint64        `json:"lag"` // follower: records behind the leader at the last pull
 	Keys     int           `json:"keys"`
-	Reads    uint64        `json:"reads"` // reads served since start
+	LogBytes int64         `json:"logBytes"` // M5: its log's size, for before/after shard sizes
+	Reads    uint64        `json:"reads"`    // reads served since start
 	CommitMs struct {
 		Last float64 `json:"last"`
 		P99  float64 `json:"p99"`
@@ -656,7 +657,7 @@ func (r *Replica) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := Status{Status: "ok", Version: buildinfo.Version, Shard: r.cfg.Shard, Replica: r.cfg.Replica,
-		Epoch: r.epoch, Leader: r.leaderID, Last: last, Keys: r.st.Len(), Reads: r.reads.Load()}
+		Epoch: r.epoch, Leader: r.leaderID, Last: last, Keys: r.st.Len(), LogBytes: r.st.Size(), Reads: r.reads.Load()}
 	switch {
 	case r.isLeaderLocked():
 		s.Role = "leader"

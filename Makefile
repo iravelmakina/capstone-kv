@@ -23,7 +23,7 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down rebuild-replica smoke \
+.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave rebuild-replica smoke \
         up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys monitoring-images monitoring-check grafana prometheus
 
 help:            ## list targets
@@ -127,7 +127,16 @@ local-up: keys   ## build the image and start coordinator + 2 shards x 3 replica
 	docker compose up --build -d
 
 local-down:      ## stop the local cluster (add -v to docker compose down to wipe data)
-	docker compose down
+	docker compose --profile shard3 down
+
+local-seed:      ## put N items into the local cluster's table users (N=20000)
+	KV_API_KEY=$$(cat secrets/ops.key) scripts/local-seed.sh $(or $(N),20000)
+
+local-join:      ## M5: start shard-3 and migrate its keys in, with a write verifier (ADR-0033)
+	KV_API_KEY=$$(cat secrets/ops.key) scripts/local-migrate.sh join
+
+local-leave:     ## M5: migrate shard-3's keys out, stop it and forget it
+	KV_API_KEY=$$(cat secrets/ops.key) scripts/local-migrate.sh leave
 
 # A replica whose log is damaged in the middle refuses to start (ADR-0018). Rebuild it:
 # remove its container and volume, start it empty, and it pulls the leader's whole log

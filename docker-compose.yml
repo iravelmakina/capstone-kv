@@ -64,6 +64,28 @@ services:
     ports: ["127.0.0.1:8123:8080"]
     volumes: [r2c-data:/data]
 
+  # --- M5: a third replica set that joins and leaves the ring (ADR-0033). Not started by
+  # `make local-up`: `make local-join` starts it and migrates its keys in, `make local-leave`
+  # moves them out and stops it. Replica health on 127.0.0.1:8131-8133.
+  r3a:
+    <<: *replica
+    profiles: [shard3]
+    environment: { <<: *replica-env, KV_SHARD: shard-3, KV_REPLICA: 3a, KV_ADVERTISE_URL: "http://r3a:8080" }
+    ports: ["127.0.0.1:8131:8080"]
+    volumes: [r3a-data:/data]
+  r3b:
+    <<: *replica
+    profiles: [shard3]
+    environment: { <<: *replica-env, KV_SHARD: shard-3, KV_REPLICA: 3b, KV_ADVERTISE_URL: "http://r3b:8080" }
+    ports: ["127.0.0.1:8132:8080"]
+    volumes: [r3b-data:/data]
+  r3c:
+    <<: *replica
+    profiles: [shard3]
+    environment: { <<: *replica-env, KV_SHARD: shard-3, KV_REPLICA: 3c, KV_ADVERTISE_URL: "http://r3c:8080" }
+    ports: ["127.0.0.1:8133:8080"]
+    volumes: [r3c-data:/data]
+
   # --- Monitoring (M4, ADR-0029): the same configuration files as on the monitor instance.
   # Grafana http://localhost:3000, Prometheus :9090, Alertmanager :9093 (this machine only).
   prometheus:
@@ -128,3 +150,6 @@ volumes:
   r2a-data: { name: kv-r2a-data }
   r2b-data: { name: kv-r2b-data }
   r2c-data: { name: kv-r2c-data }
+  r3a-data: { name: kv-r3a-data }
+  r3b-data: { name: kv-r3b-data }
+  r3c-data: { name: kv-r3c-data }

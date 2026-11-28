@@ -556,8 +556,9 @@ func (m *Membership) count(id string, status int) {
 // ShardStatus is one row of GET /internal/v1/shards.
 type ShardStatus struct {
 	ID           string          `json:"id"`
-	State        string          `json:"state"` // pending, active, leaving or retired (ADR-0033)
-	Base         bool            `json:"base"`  // one of the base sets, which can't be removed
+	State        string          `json:"state"`   // pending, active, leaving or retired (ADR-0033)
+	Base         bool            `json:"base"`    // one of the base sets, which can't be removed
+	Serving      bool            `json:"serving"` // a confirmed live leader and a quorum of live replicas: it can take traffic
 	Epoch        uint64          `json:"epoch"`
 	Leader       string          `json:"leader"`
 	Replicas     []ReplicaStatus `json:"replicas"`
@@ -580,7 +581,8 @@ func (m *Membership) Status() []ShardStatus {
 	defer m.mu.RUnlock()
 	out := make([]ShardStatus, 0, len(m.shards))
 	for id, set := range m.shards {
-		s := ShardStatus{ID: id, State: set.state, Base: set.base, Epoch: set.epoch, Leader: set.leader, Replicas: []ReplicaStatus{},
+		s := ShardStatus{ID: id, State: set.state, Base: set.base, Serving: m.servingLocked(id, set) == nil,
+			Epoch: set.epoch, Leader: set.leader, Replicas: []ReplicaStatus{},
 			Unavailable: set.unavailable.Load(), NotCommitted: set.notCommitted.Load()}
 		for rid, info := range set.replicas {
 			silent := m.now().Sub(info.lastSeen)
