@@ -61,6 +61,17 @@ Writes to that shard get 503; reads too if fewer than 2 replicas are live.
 silent, the coordinator promotes the more up-to-date one. Never force a promotion by hand:
 that is how committed writes get lost.
 
+## MigrationStalled (info, M5)
+
+**Means:** a migration (a replica set joining or leaving the ring, ADR-0033) has copied,
+scanned or switched nothing for 5 minutes.
+**Check:** `GET /v1/admin/migrations/current` (phase, per-source progress) and the
+coordinator's log lines starting `migration`: an unreachable target or source leader, or a
+cutover that keeps missing its 2 s deadline.
+**Do:** fix the unreachable set (it is usually a replica or node alert too). Before any
+source has cut over, `DELETE /v1/admin/migrations/current` aborts it (or the ops agent
+proposes `abort_migration`); after a cutover it can only finish.
+
 ## LeadersColocated (info, M5)
 
 **Means:** for 2 minutes a node has led two or more shards while one of those shards has a

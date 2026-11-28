@@ -53,17 +53,20 @@ type Migration struct {
 	// TriggerRate is the request rate (per second) that made the autoscaler start this
 	// migration, kept for its scale-in rule (ADR-0032); 0 when a person started it.
 	TriggerRate float64 `json:"triggerRate,omitempty"`
-	Reason      string  `json:"reason,omitempty"` // why it was aborted
+	Reason      string  `json:"reason,omitempty"`    // why it was aborted
+	CleanedUp   bool    `json:"cleanedUp,omitempty"` // aborted: targets purged, sources unfrozen
 }
 
 // SourceProgress is how far one source is.
 type SourceProgress struct {
-	CommitPoint uint64 `json:"commitPoint"` // the source's commit point the copy started from
-	Copied      int64  `json:"copied"`      // records applied on targets so far
-	Left        int64  `json:"left"`        // records the source still has to send (estimate)
-	TailLSN     uint64 `json:"tailLSN"`     // the source LSN the targets have applied up to
-	CutOver     bool   `json:"cutOver"`     // its moving keys now belong to their new owners
-	Purged      bool   `json:"purged"`
+	CommitPoint  uint64 `json:"commitPoint"`  // the source's commit point the copy started from
+	Copied       int64  `json:"copied"`       // records applied on targets so far
+	Left         int64  `json:"left"`         // records the source still has to send (estimate)
+	TailLSN      uint64 `json:"tailLSN"`      // the source LSN the targets have applied up to
+	SnapshotDone bool   `json:"snapshotDone"` // its state as of CommitPoint is on the targets
+	CutOver      bool   `json:"cutOver"`      // its moving keys now belong to their new owners
+	Purged       bool   `json:"purged"`       // it dropped the moved keys
+	Unfrozen     bool   `json:"unfrozen"`     // its freeze is lifted, so a later change can move keys back
 }
 
 // Running reports whether the migration still changes routing.

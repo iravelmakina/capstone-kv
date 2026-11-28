@@ -204,3 +204,23 @@ tests:
       - eval_time: 4m30s
         alertname: LeadersColocated
         exp_alerts: []
+
+  # A running migration whose progress counter stops: MigrationStalled after 5 minutes
+  # flat plus the 1-minute "for"; a migration that moves doesn't fire.
+  - interval: 30s
+    input_series:
+      - series: 'kv_migration_running'
+        values: "1x30"
+      - series: 'kv_migration_progress_total'
+        values: "0+100x6 600x24"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MigrationStalled
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MigrationStalled
+        exp_alerts:
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: The running migration has made no progress for 5 minutes
+              description: "Check GET /v1/admin/migrations/current and the coordinator's log; abort before a cutover if needed (runbook: MigrationStalled)."

@@ -34,15 +34,17 @@ type MembershipConfig struct {
 // and epoch (ADR-0020). Shards join the ring when their first replica reports in and stay
 // on it; only an explicit Remove takes a shard off.
 type Membership struct {
-	cfg    MembershipConfig
-	mu     sync.RWMutex
-	shards map[string]*replicaSet
-	ring   *ring.Ring
-	now    func() time.Time
-	mig    *Migration   // the running migration, or the last one (ADR-0033); guarded by mu
-	after  *ring.Ring   // a running migration's ring after the change; nil otherwise
-	client *http.Client // short timeout: asking followers before a promotion
-	ctl    *http.Client // no timeout of its own: transfer calls carry their own deadline
+	cfg          MembershipConfig
+	mu           sync.RWMutex
+	shards       map[string]*replicaSet
+	ring         *ring.Ring
+	now          func() time.Time
+	mig          *Migration               // the running migration, or the last one (ADR-0033); guarded by mu
+	after        *ring.Ring               // a running migration's ring after the change; nil otherwise
+	cutoverHolds map[string]chan struct{} // source -> hold on its moving keys' writes (runner.go)
+	migProgress  atomic.Uint64            // records and steps the runner got done (MigrationStalled)
+	client       *http.Client             // short timeout: asking followers before a promotion
+	ctl          *http.Client             // no timeout of its own: transfer calls carry their own deadline
 }
 
 type replicaSet struct {

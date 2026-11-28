@@ -63,6 +63,16 @@ groups:
       # Two leaders on one node while a follower could take one elsewhere (ADR-0036): losing
       # that node would stop two shards' writes. Nothing moves on its own; the ops agent
       # proposes a transfer and a person approves it.
+      # A migration that makes no progress for 5 minutes (ADR-0033): a target or source
+      # unreachable, or a cutover that keeps missing its deadline with no writes flowing.
+      - alert: MigrationStalled
+        expr: kv_migration_running == 1 and on () increase(kv_migration_progress_total[5m]) == 0
+        for: 1m
+        labels: { severity: info }
+        annotations:
+          summary: The running migration has made no progress for 5 minutes
+          description: "Check GET /v1/admin/migrations/current and the coordinator's log; abort before a cutover if needed (runbook: MigrationStalled)."
+
       - alert: LeadersColocated
         expr: kv_leaders_colocated > 0
         for: 2m

@@ -54,16 +54,16 @@ func (c RingChange) rings() *rings {
 
 // Owners returns a storage key's owner before and after the change.
 func (c RingChange) Owners(storageKey string) (before, after string) {
-	rk := routingKeyOf(storageKey)
+	rk := RoutingKeyOf(storageKey)
 	rs := c.rings()
 	before, _ = rs.before.Lookup(rk)
 	after, _ = rs.after.Lookup(rk)
 	return before, after
 }
 
-// routingKeyOf is the part of a storage key the ring hashes: table and partition key,
+// RoutingKeyOf is the part of a storage key the ring hashes: table and partition key,
 // without the sort key (ADR-0012; StorageKey and ring.RoutingKey).
-func routingKeyOf(storageKey string) []byte {
+func RoutingKeyOf(storageKey string) []byte {
 	i := strings.IndexByte(storageKey, 0)
 	if i < 0 {
 		return []byte(storageKey)
@@ -86,6 +86,16 @@ func (c RingChange) movingTo(target, key string) bool {
 	return a == target && b != target
 }
 
+// movingFilter selects the keys a state or tail request is about: those moving from this
+// set to the request's target, or with no target, every key moving away from this set
+// (the coordinator sorts them by their new owner: a removal has several targets).
+func (r *Replica) movingFilter(m MigrateRequest) func(string) bool {
+	if m.Target == "" {
+		return func(k string) bool { return m.Change.movingAway(r.cfg.Shard, k) }
+	}
+	return func(k string) bool { return m.Change.movingTo(m.Target, k) && m.Change.movingAway(r.cfg.Shard, k) }
+}
+
 // frozenCheck is the store's FrozenCheck: a key is frozen by a freeze whose ring change
 // moves it away from this replica set.
 func (r *Replica) frozenCheck(desc []byte, key string) bool {
@@ -99,7 +109,7 @@ func (r *Replica) frozenCheck(desc []byte, key string) bool {
 // MigrateRequest is the body of every migrate endpoint; each uses the fields it needs.
 type MigrateRequest struct {
 	Change   RingChange   `json:"change"`
-	Target   string       `json:"target,omitempty"`   // state, tail: the set the keys move to
+	Target   string       `json:"target,omitempty"`   // state, tail: the set the keys move to; "" = any
 	Upto     uint64       `json:"upto,omitempty"`     // state: the commit point
 	After    string       `json:"after,omitempty"`    // state: the last key of the previous page
 	From     uint64       `json:"from,omitempty"`     // tail: the LSN already applied
@@ -166,15 +176,11 @@ func (r *Replica) migrateState(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	if m.Target == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "state needs target (and upto, the commit point)")
-		return
-	}
 	limit := m.Limit
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
 	}
-	copies, more := r.st.Snapshot(m.After, limit, m.Upto, func(k string) bool { return m.Change.movingTo(m.Target, k) })
+	copies, more := r.st.Snapshot(m.After, limit, m.Upto, r.movingFilter(m))
 	httpx.WriteJSON(w, http.StatusOK, MigrateAnswer{Copies: copies, More: more})
 }
 
@@ -183,10 +189,6 @@ func (r *Replica) migrateState(w http.ResponseWriter, req *http.Request) {
 func (r *Replica) migrateTail(w http.ResponseWriter, req *http.Request) {
 	m, _, ok := r.readMigrate(w, req)
 	if !ok {
-		return
-	}
-	if m.Target == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "tail needs target")
 		return
 	}
 	limit := m.Limit
@@ -212,12 +214,13 @@ func (r *Replica) migrateTail(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	ans := MigrateAnswer{Next: m.From}
+	moving := r.movingFilter(m)
 	for _, rec := range recs {
 		if rec.LSN > commit {
 			break // never ship what hasn't committed
 		}
 		ans.Next = rec.LSN
-		if (rec.Op == store.OpPut || rec.Op == store.OpDelete) && m.Change.movingTo(m.Target, rec.Key) {
+		if (rec.Op == store.OpPut || rec.Op == store.OpDelete) && moving(rec.Key) {
 			ans.Copies = append(ans.Copies, store.Copy{Key: rec.Key, Value: rec.Value, Deleted: rec.Op == store.OpDelete, Stamp: rec.Stamp})
 		}
 	}

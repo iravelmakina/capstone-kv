@@ -69,6 +69,7 @@ func main() {
 	vnodes := flag.Int("vnodes", envInt("KV_VNODES", ring.DefaultVirtualNodes), "virtual nodes per shard (ADR-0011)")
 	apiKeys := flag.String("api-keys-file", env("KV_API_KEYS_FILE", ""), "API key hashes and scopes (ADR-0027); empty = no keys required")
 	timeout := flag.Duration("heartbeat-timeout", envDuration("KV_HEARTBEAT_TIMEOUT", 15*time.Second), "silence after which a replica is unavailable")
+	migRate := flag.Int("migration-rate", envInt("KV_MIGRATION_RATE", 2000), "records a migration copies per second, at most (ADR-0033)")
 	firstWait := flag.Duration("first-leader-wait", envDuration("KV_FIRST_LEADER_WAIT", 3*time.Minute), "how long a new set waits for all its replicas before choosing its first leader from a majority (ADR-0036)")
 
 	// Replica settings.
@@ -124,6 +125,7 @@ func main() {
 			log.Fatalf("load leader assignments: %v", err)
 		}
 		go members.Watch(ctx, time.Second)
+		go members.RunMigrations(ctx, coordinator.RunnerConfig{Rate: *migRate}) // ADR-0033
 		// R + W > N: with W = 2 two replicas answer each read, with W = 1 all of them (ADR-0021).
 		r := *replicas + 1 - *w
 		coord := coordinator.New(tables, members, r)

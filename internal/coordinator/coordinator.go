@@ -241,10 +241,11 @@ func (c *Coordinator) item(w http.ResponseWriter, r *http.Request) {
 }
 
 // write sends a put or delete to the shard's leader and relays the answer (ADR-0021).
-// During a planned leader transfer (ADR-0036) it waits out the shard's write hold first;
-// a write the old leader refused with 409 (it was stepping down when the write reached it)
-// waits for the hold too and goes once more to whoever leads then: the refused write was
-// never appended, so sending it again can't apply it twice.
+// During a planned leader transfer (ADR-0036) it waits out the shard's write hold first,
+// and during a migration's cutover (ADR-0033) the hold on the moving key's source; a write
+// the leader refused with 409 (stepping down, or the key frozen as "moved") waits for the
+// holds too and goes once more to whoever owns and leads then: the refused write was never
+// appended, so sending it again can't apply it twice.
 func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, method string, routing []byte, path string, body []byte) {
 	ctx := context.Background()
 	var resp *http.Response
@@ -257,6 +258,11 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, 
 		if held := c.members.WaitHold(ctx, id); held > 0 {
 			c.metrics.hold.With(id).Observe(held.Seconds())
 			id, addr, ok = c.members.WriteTarget(routing)
+		}
+		if src, held := c.members.WaitCutover(ctx, routing); held > 0 { // a migration's cutover (ADR-0033)
+			c.metrics.hold.With(src).Observe(held.Seconds())
+			id, addr, ok = c.members.WriteTarget(routing)
+			ri.shard = id
 		}
 		if !ok {
 			c.fail(w, id, http.StatusServiceUnavailable, "shard "+id+" has no live leader")
@@ -279,10 +285,12 @@ func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, 
 		if resp.StatusCode != http.StatusConflict || attempt > 0 {
 			break
 		}
-		// 409: not (or no longer) the leader. Retry only if leadership is moving or moved.
+		// 409: not (or no longer) the leader, or "moved" (the key's source froze it in a
+		// cutover). Retry once if leadership or ownership is moving or moved.
 		held := c.members.WaitHold(ctx, id)
+		_, cut := c.members.WaitCutover(ctx, routing)
 		_, now, _ := c.members.WriteTarget(routing)
-		if held == 0 && now == addr {
+		if held == 0 && cut == 0 && now == addr {
 			break // nothing changed: answer as before
 		}
 		resp.Body.Close()

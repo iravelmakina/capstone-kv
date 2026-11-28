@@ -113,6 +113,36 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 			}
 			return float64(n)
 		})
+	reg.Gauge("kv_migration_running", "1 while a migration (a ring change, ADR-0033) is running.", func() float64 {
+		return boolValue(m.CurrentMigration().Running())
+	})
+	reg.GaugeFunc("kv_migration_phase", "1 for the current (or last) migration's phase.", []string{"migration", "phase"},
+		func() []metrics.Sample {
+			if mg := m.CurrentMigration(); mg != nil {
+				return []metrics.Sample{{Labels: []string{mg.ID, mg.Phase}, Value: 1}}
+			}
+			return nil
+		})
+	reg.CounterFunc("kv_migration_progress_total",
+		"Records copied or scanned and steps completed by the migration runner; flat while running = stalled.",
+		func() float64 { return float64(m.migProgress.Load()) })
+	sourceSamples := func(value func(*SourceProgress) float64) func() []metrics.Sample {
+		return func() []metrics.Sample {
+			mg := m.CurrentMigration()
+			if !mg.Running() {
+				return nil
+			}
+			var out []metrics.Sample
+			for src, p := range mg.Sources {
+				out = append(out, metrics.Sample{Labels: []string{src}, Value: value(p)})
+			}
+			return out
+		}
+	}
+	reg.GaugeFunc("kv_migration_records_copied", "Running migration: records applied on new owners, per source.",
+		[]string{"source"}, sourceSamples(func(p *SourceProgress) float64 { return float64(p.Copied) }))
+	reg.GaugeFunc("kv_migration_records_left", "Running migration: committed records the source still has to send (tail).",
+		[]string{"source"}, sourceSamples(func(p *SourceProgress) float64 { return float64(max(p.Left, 0)) }))
 	reg.GaugeFunc("kv_node_leaders", "Shard leaders running on each node (ADR-0036: at most one where possible).",
 		[]string{"node"}, func() []metrics.Sample {
 			perNode, _ := m.LeaderPlacement()
