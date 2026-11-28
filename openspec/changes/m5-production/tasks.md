@@ -59,9 +59,9 @@
 
 ## 9. Defense material
 
-- [ ] 9.1 README: how to bring M5 up, how to verify it, what changed since M4, that only shard-3 can be removed
-- [ ] 9.2 `docs/m5/control-questions.md`: notes for the eight control questions, with the measured numbers, and why scale-in also checks the load (beyond the brief's rule)
-- [ ] 9.3 `AGENT_WORKLOG.md` rows for every agent interaction of M5
+- [x] 9.1 README: how to bring M5 up, how to verify it, what changed since M4, that only shard-3 can be removed
+- [x] 9.2 `docs/m5/control-questions.md`: notes for the eight control questions, with the measured numbers, and why scale-in also checks the load (beyond the brief's rule)
+- [x] 9.3 `AGENT_WORKLOG.md` rows for every agent interaction of M5
 
 ## Workflow follow-up
 

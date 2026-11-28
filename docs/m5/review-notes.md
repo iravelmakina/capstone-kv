@@ -174,3 +174,26 @@ one adds the part that talks to Claude and the way it is run.
 - Not done here: task 7.5 (the demo transcript and the evaluation pass rate) needs real
   model calls, which cost money; left for the author with `ANTHROPIC_API_KEY`
   (`docs/m5/ops-agent.md` has the steps).
+
+## Group 9 and the local autoscaling run (tasks 9.1–9.3)
+
+Committed on the instruction to continue without stops; review later. Documentation only,
+no code.
+
+- `docs/m5/autoscaling-local.md`: a whole cycle on compose, run by Claude Code: 64 writers
+  for 10 min → `ScaleOutDue` after 3 min → launch → join 17 s later → migration → 3 sets;
+  load off → scale-in 15 min later → leave migration < 46 s → stop → forget. 335,078 writes,
+  all 200. Two honest findings: locally p99 did not drop with the third set (one laptop's
+  disk for all nine replicas), and the join's recorded rate is a 10-minute average, which
+  after a fast ramp makes scale-in stricter than ADR-0032 intends (safe direction; to look
+  at in AWS, and if it matters, a superseding ADR, not an edit of 0032).
+- `docs/m5/control-questions.md`: notes for the eight questions, local numbers filled, AWS
+  numbers marked _to be filled_ (group 8).
+- `README.md`: current milestone M5, M5 decisions and evidence, rebalancing and ops-agent
+  commands, verify rows, "What changed since M4" (and the old section renamed "What changed
+  in M4 (since M3)"), only shard-3 can leave.
+- `CLAUDE.md`: current milestone M5, `docs/m5/`, the OpenSpec commands for `m5-production`.
+- Checks before the commit: `go vet`, `gofmt`, `go test -race ./...` (main module and
+  `cmd/kvops`), `cmd/kvmcp` tests, `make monitoring-check`, `make lint`, `openspec validate
+  m5-production --strict`: all pass.
+

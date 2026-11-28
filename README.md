@@ -4,8 +4,9 @@ A small DynamoDB-like key-value store, built over five milestones for the KSE Cl
 Architectures course (2026/27), in the AWS Academy sandbox. Course brief:
 [`docs/course/capstone-brief.md`](docs/course/capstone-brief.md).
 
-**Current milestone: M4 — monitoring and handling failures.** Spec: OpenSpec change
-[`m4-monitoring`](openspec/changes/m4-monitoring/proposal.md), built on M3's
+**Current milestone: M5 — preparing for production** (autoscaling, rebalancing, the ops
+agent). Spec: OpenSpec change [`m5-production`](openspec/changes/m5-production/proposal.md),
+built on M4's [`m4-monitoring`](openspec/changes/m4-monitoring/proposal.md), M3's
 [`m3-replication`](openspec/changes/m3-replication/proposal.md) and M2's
 [`m2-sharding`](openspec/changes/m2-sharding/proposal.md) (each archived after its defense). M1 is
 archived in [`openspec/changes/archive/`](openspec/changes/archive/), its requirements are the
@@ -51,13 +52,15 @@ client ──HTTP──▶ coordinator ──▶ shard-1:  1a leader        1b  
 
 | Item | Where |
 | --- | --- |
+| M5 decisions | [ADR-0032](docs/adr/0032-scaling-metric-and-thresholds.md) scaling metric and thresholds, [0033](docs/adr/0033-rebalancing-algorithm.md) rebalancing algorithm, [0034](docs/adr/0034-ops-agent-autonomy.md) the ops agent's autonomy, [0035](docs/adr/0035-scaling-unit-and-execution.md) capacity for the extra set, [0036](docs/adr/0036-leader-placement.md) leader placement and planned transfer |
 | M4 decisions | [ADR-0025](docs/adr/0025-metrics-and-slis.md) metrics and SLIs, [0026](docs/adr/0026-slo-values.md) SLO values, [0027](docs/adr/0027-mcp-boundaries-and-auth.md) MCP boundaries and authorisation, [0028](docs/adr/0028-record-versions-and-lww.md) record versions and last-write-wins, [0029](docs/adr/0029-monitoring-stack-and-logs.md) monitoring stack and logs; after the AWS drills: [0030](docs/adr/0030-availability-slo-after-drills.md) availability SLO, [0031](docs/adr/0031-latency-histogram-buckets.md) latency histogram buckets |
 | M3 decisions | [ADR-0020](docs/adr/0020-replication-model-and-placement.md) replication model, placement and leader changes, [0021](docs/adr/0021-n-w-r-values.md) N / W / R, [0022](docs/adr/0022-log-structure-and-ordering.md) log structure and ordering, [0023](docs/adr/0023-replica-sync.md) replica sync and rejoin |
 | M2 decisions | [ADR-0009](docs/adr/0009-runtime-and-delivery.md) runtime and delivery, [0010](docs/adr/0010-api-protocol.md) API, [0011](docs/adr/0011-hash-and-virtual-nodes.md) hash and virtual nodes, [0012](docs/adr/0012-partition-key-strategy.md) partition key, [0013](docs/adr/0013-shard-storage-and-membership.md) storage and membership, [0014](docs/adr/0014-app-infrastructure.md) app infrastructure, [0015](docs/adr/0015-ci-cd-pipeline.md) CI/CD, [0016](docs/adr/0016-benchmark.md) benchmark; after the AI review: [0017](docs/adr/0017-pinned-ami.md) pinned AMI, [0018](docs/adr/0018-log-damage-and-failed-writes.md) damaged logs and failed writes |
-| Code | [`cmd/kvnode`](cmd/kvnode/main.go), [`internal/`](internal/) (`ring`, `store`, `shard` with [`replica.go`](internal/shard/replica.go), `coordinator` with [`membership.go`](internal/coordinator/membership.go), `metrics`, `auth`), [`cmd/kvmcp`](cmd/kvmcp/) (MCP server, its own module), [`bench/`](bench/) (go-ycsb binding) |
+| Code | [`cmd/kvnode`](cmd/kvnode/main.go), [`internal/`](internal/) (`ring`, `store`, `shard` with [`replica.go`](internal/shard/replica.go), `coordinator` with [`membership.go`](internal/coordinator/membership.go), `metrics`, `auth`), [`cmd/kvmcp`](cmd/kvmcp/) (MCP server, its own module), [`cmd/kvscale`](cmd/kvscale/main.go) and `internal/scale` (autoscaling executor), [`cmd/kvops`](cmd/kvops/) (ops agent, its own module) and `internal/ops`, [`bench/`](bench/) (go-ycsb binding) |
 | Monitoring | [`monitoring/`](monitoring/): Prometheus config, [alert rules](monitoring/rules.yml) and their tests, Alertmanager, probe, Loki, Alloy, [dashboard](monitoring/grafana/dashboards/capstone-kv.json); [runbook](docs/m4/runbook.md) |
 | Infrastructure | [`infra/network.yaml`](infra/network.yaml) (M1), [`infra/artifacts.yaml`](infra/artifacts.yaml), [`infra/app.yaml`](infra/app.yaml), [`Makefile`](Makefile) |
 | Pipeline | [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml), [`benchmark.yml`](.github/workflows/benchmark.yml); runs in [`docs/m2/pipeline.md`](docs/m2/pipeline.md) |
+| M5 evidence and prep | [rebalancing sizes](docs/m5/rebalancing.md), [local autoscaling run](docs/m5/autoscaling-local.md), [ops agent](docs/m5/ops-agent.md), [control questions](docs/m5/control-questions.md), [AI design review](docs/m5/ai-review.md), [notes for the code review](docs/m5/review-notes.md) |
 | M4 defense prep | [AI design review](docs/m4/ai-review.md) |
 | M3 evidence | [local failure tests](docs/m3/evidence/local-docker.txt), [AWS sessions](docs/m3/evidence/aws-deploy.txt), [benchmark vs M2](docs/m3/benchmark.md), [spend](docs/m3/cost.md) |
 | M3 defense prep | [control questions](docs/m3/control-questions.md), [AI design review](docs/m3/ai-review.md) |
@@ -147,6 +150,30 @@ curl -H "$A" -X DELETE localhost:8080/v1/tables/users/items/u1
 curl         localhost:8080/internal/v1/shards            # ring membership (no key: internal)
 ```
 
+Rebalancing (M5, ADR-0033): the third replica set `r3a`–`r3c` is a Compose profile that
+`make local-up` doesn't start. `local-join` starts it, waits until it serves, migrates its
+keys in and prints each set's keys and log size before and after, with a write verifier
+running throughout; `local-leave` moves them back out, stops and forgets it. Only shard-3 can
+leave: the two base sets are never removed (`409`).
+
+```bash
+make local-seed N=20000           # data to move
+make local-join                   # shard-3 joins: sizes before/after, verifier result
+make local-leave                  # shard-3 leaves
+curl -H "Authorization: Bearer $(cat secrets/ops.key)" localhost:8080/v1/admin/cluster   # sets, ring, migration
+```
+
+The ops agent (M5, ADR-0034) proposes, a person approves, kvscale executes. It calls Claude,
+so it needs `ANTHROPIC_API_KEY` and is billed; steps in [`docs/m5/ops-agent.md`](docs/m5/ops-agent.md).
+
+```bash
+make ops-key                      # a key with only the status scope, for the agent
+make autoscale-local AUTOSCALE=no # kvscale: executes approved proposals, scales nothing itself
+make ops-agent                    # one run in its container (no AWS credentials, no admin key)
+make ops-approve ID=p-...         # the gate, on the host: shows the proposal, asks for yes
+make ops-eval                     # the evaluation set's pass rate
+```
+
 ## Deploy to AWS
 
 Normally the pipeline does it: a push to `main` runs tests, builds the release (named by the
@@ -216,6 +243,10 @@ image, updates keep it. Upgrading replaces every instance and the replicas' data
 | M2 behaviour on failure | [`docs/m2/evidence/local-docker.txt`](docs/m2/evidence/local-docker.txt): shard restart replays its log; a stopped shard's keys answer 503, the rest keep working; coordinator restart waits for the shards (`/health` is 503 until then). Damaged logs and failed writes: `go test ./internal/store/` (ADR-0018) |
 | Performance | `make up-app BENCH=true && make bench-aws && make down-app`, or the **benchmark** workflow; variants: `make up-app BENCH=true W=1` then `make bench-aws WORKLOADS=a LABEL=w1` |
 | Monitoring | `make monitoring-check` (alert rule tests); the drills in [`docs/m4/runbook.md`](docs/m4/runbook.md): stop a node, see `NodeDown` in Telegram and on the dashboard |
+| Rebalancing | `make local-join` / `make local-leave`: sizes before and after, 0 lost writes; results in [`docs/m5/rebalancing.md`](docs/m5/rebalancing.md); `go test ./internal/coordinator/ -run Migration` (`KV_MIGRATION_KEYS=100000` for the large run) |
+| Autoscaling | `go test ./internal/scale/` (the decision table, the AWS CLI calls); `make monitoring-check` (scale-out/in alerts); a whole cycle on compose in [`docs/m5/autoscaling-local.md`](docs/m5/autoscaling-local.md) |
+| Health and version | `/health` (live), `/health/ready` (503 + reason until a replica knows its leader, or the coordinator its sets), `/version` on every process |
+| Ops agent | `(cd cmd/kvops && go test ./...)` (loop with a fake model, evaluation set loads); `make ops-eval` (billed) |
 | Versions, keys, MCP | `go test ./internal/store/ ./internal/shard/ ./internal/auth/ ./internal/coordinator/`; `(cd cmd/kvmcp && go test ./...)` |
 
 The scenarios each check must satisfy are in the
@@ -223,7 +254,32 @@ The scenarios each check must satisfy are in the
 [M3 specs](openspec/changes/m3-replication/specs/) and the
 [M2 specs](openspec/changes/m2-sharding/specs/).
 
-## What changed since M3
+## What changed since M4
+
+- **Rebalancing (ADR-0033):** replica sets have states (pending, active, leaving,
+  retired); a migration copies a snapshot at the commit point, then the committed tail of
+  the moving keys only, then cuts over per source behind a replicated freeze record and a
+  write hold of at most 2 s on those keys; then purge. Progress is persisted and resumes after
+  a coordinator restart. Record format 3 (freeze, unfreeze, purge records). Only the extra
+  set shard-3 can leave.
+- **Autoscaling (ADR-0032, ADR-0035):** `cmd/kvscale` on the laptop with lab credentials;
+  scale-out on p99 (writes 50 ms, reads 12 ms, confirmed on the shard) at ≥ 100 req/s;
+  scale-in after 10 min below and the load under half of the scale-out load; guards;
+  shard-3 as three single-subnet Auto Scaling groups (max 1). New bucket edge 12 ms;
+  recording rules and alerts `ScaleOutDue`, `ScaleInLatencyOk`, `CoordinatorBound`,
+  `LeadersColocated`, `MigrationStalled`; Prometheus finds replicas through the coordinator's
+  `/sd` (http_sd).
+- **Leaders (ADR-0036):** a node with no leader gets the next one; planned leader transfer
+  (`POST /v1/admin/shards/{id}/leader`), fenced, only on request.
+- **Health:** `/health/ready` and `/version` (commit, build time, Go version) on every
+  process; replicas answer health while they replay their log.
+- **Ops agent (ADR-0034):** `cmd/kvops`, its own Go module: read-only tools, one proposal
+  per run, deterministic checks, a person approves on the host, kvscale executes after its
+  guards; an evaluation set of six recorded situations.
+- **Infrastructure:** coordinator t3.medium; ports 8083/9183; monitor root volume 30 GB;
+  Loki keeps 12 h; `make up-app` refuses while shard-3 has instances.
+
+## What changed in M4 (since M3)
 
 - **Metrics:** `/metrics` on its own port (coordinator 9180, replicas 9181/9182) on every
   process; SLIs are availability and p99 per shard at the coordinator, plus a probe from
