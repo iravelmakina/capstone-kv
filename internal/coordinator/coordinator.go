@@ -499,9 +499,13 @@ func (c *Coordinator) listShards(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Coordinator) removeShard(w http.ResponseWriter, r *http.Request) {
-	if !c.members.Remove(r.PathValue("id")) {
-		httpx.WriteError(w, http.StatusNotFound, "shard not found")
-		return
+	var se *StatusError
+	switch err := c.members.Remove(r.PathValue("id")); {
+	case errors.As(err, &se):
+		httpx.WriteError(w, se.Status, se.Msg)
+	case err != nil:
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+	default:
+		w.WriteHeader(http.StatusNoContent)
 	}
-	w.WriteHeader(http.StatusNoContent)
 }

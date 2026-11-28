@@ -54,6 +54,8 @@ type replicaSet struct {
 	// it is closed when they may go on. transferring is set for the transfer's duration.
 	hold         chan struct{}
 	transferring bool
+	state        string // StatePending, StateActive, StateLeaving or StateRetired (ADR-0033)
+	base         bool   // one of the first ExpectedShards sets: the minimum, can't be removed
 }
 
 type replicaInfo struct {
@@ -63,10 +65,24 @@ type replicaInfo struct {
 	last     store.Version
 }
 
-// assignment is what the coordinator persists per shard.
+// A replica set's state (ADR-0033). Only active and leaving sets are on the ring.
+const (
+	StatePending = "pending" // registered, not on the ring: no client request goes to it
+	StateActive  = "active"  // on the ring
+	StateLeaving = "leaving" // on the ring, its keys moving away (a removal migration)
+	StateRetired = "retired" // off the ring after a removal; may be stopped
+)
+
+func onRing(state string) bool { return state == StateActive || state == StateLeaving }
+
+// assignment is what the coordinator persists per shard: its leader and epoch (ADR-0020)
+// and, from M5, its state and whether it is one of the base sets that can't be removed.
+// An M4 record has no state: it is an active base set.
 type assignment struct {
 	Leader string `json:"leader"`
 	Epoch  uint64 `json:"epoch"`
+	State  string `json:"state,omitempty"`
+	Base   bool   `json:"base,omitempty"`
 }
 
 // NewMembership loads the persisted leaders and returns the membership over r.
@@ -88,21 +104,68 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, fmt.Errorf("leader of %s: %w", id, err)
 		}
-		set := m.setLocked(id)
+		if a.State == "" { // written by M4: every set then was an active base set
+			a.State, a.Base = StateActive, true
+		}
+		set := m.addSetLocked(id, a.State, a.Base)
 		set.leader, set.epoch = a.Leader, a.Epoch
 	}
 	return m, nil
 }
 
-// setLocked returns the replica set, creating it (and putting it on the ring) if new.
-func (m *Membership) setLocked(id string) *replicaSet {
-	set, ok := m.shards[id]
-	if !ok {
-		set = &replicaSet{replicas: map[string]*replicaInfo{}, firstSeen: m.now()}
-		m.shards[id] = set
+// addSetLocked creates a replica set in a state, on the ring if the state says so.
+func (m *Membership) addSetLocked(id, state string, base bool) *replicaSet {
+	set := &replicaSet{replicas: map[string]*replicaInfo{}, firstSeen: m.now(), state: state, base: base}
+	m.shards[id] = set
+	if onRing(state) {
 		m.ring.Add(id)
 	}
 	return set
+}
+
+// setLocked returns the replica set, creating it if new. Until the expected number of base
+// sets exists, a new set is an active base set on the ring (the first start, as before
+// M5); after that it is pending: off the ring until a migration adds it, so its
+// registration remaps no key that holds data elsewhere (ADR-0033). The state is persisted
+// at once, so a restart can't turn a pending set into an active one.
+func (m *Membership) setLocked(id string) (*replicaSet, error) {
+	if set, ok := m.shards[id]; ok {
+		return set, nil
+	}
+	state, base := StatePending, false
+	if m.baseCountLocked() < m.cfg.ExpectedShards {
+		state, base = StateActive, true
+	}
+	set := m.addSetLocked(id, state, base)
+	if err := m.saveLocked(id, set, set.leader, set.epoch); err != nil {
+		delete(m.shards, id)
+		m.ring.Remove(id)
+		return nil, err
+	}
+	if !base {
+		log.Printf("%s: registered as pending (not on the ring until a migration adds it)", id)
+	}
+	return set, nil
+}
+
+func (m *Membership) baseCountLocked() int {
+	n := 0
+	for _, set := range m.shards {
+		if set.base {
+			n++
+		}
+	}
+	return n
+}
+
+// saveLocked persists a set's assignment with the given leader and epoch (and its current
+// state). Callers hold m.mu.
+func (m *Membership) saveLocked(id string, set *replicaSet, leader string, epoch uint64) error {
+	raw, _ := json.Marshal(assignment{Leader: leader, Epoch: epoch, State: set.state, Base: set.base})
+	if err := m.cfg.Leaders.Put(id, raw); err != nil {
+		return fmt.Errorf("save %s: %w", id, err)
+	}
+	return nil
 }
 
 func (m *Membership) liveLocked(info *replicaInfo) bool {
@@ -115,7 +178,10 @@ func (m *Membership) liveLocked(info *replicaInfo) bool {
 func (m *Membership) Heartbeat(hb shard.Heartbeat) (shard.HeartbeatAnswer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	set := m.setLocked(hb.Shard)
+	set, err := m.setLocked(hb.Shard)
+	if err != nil {
+		return shard.HeartbeatAnswer{}, err
+	}
 	set.replicas[hb.Replica] = &replicaInfo{address: hb.Address, lastSeen: m.now(), epoch: hb.Epoch, last: hb.Last}
 	if set.leader == "" {
 		if err := m.assignFirstLeaderLocked(hb.Shard, set); err != nil {
@@ -198,8 +264,7 @@ func (m *Membership) assignFirstLeaderLocked(id string, set *replicaSet) error {
 
 // setLeaderLocked saves the new leader and epoch to disk, then applies them.
 func (m *Membership) setLeaderLocked(id string, set *replicaSet, leader string, epoch uint64) error {
-	raw, _ := json.Marshal(assignment{Leader: leader, Epoch: epoch})
-	if err := m.cfg.Leaders.Put(id, raw); err != nil {
+	if err := m.saveLocked(id, set, leader, epoch); err != nil {
 		return fmt.Errorf("save leader of %s: %w", id, err)
 	}
 	set.leader, set.epoch = leader, epoch
@@ -294,29 +359,42 @@ func (m *Membership) askLast(ctx context.Context, addr string) (store.Version, e
 	return s.Last, nil
 }
 
-// Remove takes a shard off the ring and forgets its leader. Its keys move to the next
-// shards clockwise, without their data. Not permanent: a replica that is still running
-// reports in again, so stop the set first.
-func (m *Membership) Remove(id string) bool {
+// Remove forgets a set that holds no keys anyone reads: a pending one (never on the ring)
+// or a retired one (its keys moved away). A set on the ring can leave only through a
+// removal migration (ADR-0033), and a base set never: before M5 this call dropped a set
+// from the ring without moving its data, so its keys read as missing. Not permanent: a
+// replica that is still running reports in again (as pending), so stop the set first.
+func (m *Membership) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.shards[id]; !ok {
-		return false
+	set, ok := m.shards[id]
+	switch {
+	case !ok:
+		return &StatusError{http.StatusNotFound, "shard " + id + " not found"}
+	case set.base:
+		return &StatusError{http.StatusConflict, id + " is a base set: only sets added later can be removed"}
+	case onRing(set.state):
+		return &StatusError{http.StatusConflict, id + " is on the ring: remove it with a migration, which moves its keys first"}
 	}
 	m.cfg.Leaders.Delete(id)
 	delete(m.shards, id)
-	m.ring.Remove(id)
-	return true
+	return nil
 }
 
-// Ready reports whether the expected shards are known and each has a leader that has
-// confirmed its role (reported the set's epoch in a heartbeat): a leader learns it leads
-// from the answer to its heartbeat, and until then it refuses writes. Before that, routing
-// would send keys to a ring that's about to change or to a leader that doesn't know it.
+// Ready reports whether the expected base sets are known and each set on the ring has a
+// leader that has confirmed its role (reported the set's epoch in a heartbeat): a leader
+// learns it leads from the answer to its heartbeat, and until then it refuses writes.
+// Before that, routing would send keys to a ring that's about to change or to a leader
+// that doesn't know it. Pending and retired sets get no requests, so they don't count.
 func (m *Membership) Ready() (bool, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	ringed := 0
 	for _, set := range m.shards {
+		if !onRing(set.state) {
+			continue
+		}
+		ringed++
 		if set.transferring {
 			// A planned transfer started with a confirmed live leader; meanwhile writes
 			// wait on the hold and reads need no leader (ADR-0036). Its new leader is
@@ -324,10 +402,10 @@ func (m *Membership) Ready() (bool, int) {
 			continue
 		}
 		if info := set.replicas[set.leader]; set.leader == "" || info == nil || info.epoch < set.epoch {
-			return false, len(m.shards)
+			return false, ringed
 		}
 	}
-	return len(m.shards) >= m.cfg.ExpectedShards, len(m.shards)
+	return m.baseCountLocked() >= m.cfg.ExpectedShards, ringed
 }
 
 // Readiness is the rule behind GET /health/ready (M5, spec health-endpoints): Ready's
@@ -336,12 +414,14 @@ func (m *Membership) Ready() (bool, int) {
 func (m *Membership) Readiness() (bool, string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if len(m.shards) < m.cfg.ExpectedShards {
-		return false, fmt.Sprintf("%d of %d shards registered", len(m.shards), m.cfg.ExpectedShards)
+	if n := m.baseCountLocked(); n < m.cfg.ExpectedShards {
+		return false, fmt.Sprintf("%d of %d shards registered", n, m.cfg.ExpectedShards)
 	}
 	ids := make([]string, 0, len(m.shards))
-	for id := range m.shards {
-		ids = append(ids, id)
+	for id, set := range m.shards {
+		if onRing(set.state) { // pending and retired sets serve nothing
+			ids = append(ids, id)
+		}
 	}
 	sort.Strings(ids) // the same reason every time, for the same state
 	quorum := m.cfg.Replicas/2 + 1
@@ -463,6 +543,8 @@ func (m *Membership) count(id string, status int) {
 // ShardStatus is one row of GET /internal/v1/shards.
 type ShardStatus struct {
 	ID           string          `json:"id"`
+	State        string          `json:"state"` // pending, active, leaving or retired (ADR-0033)
+	Base         bool            `json:"base"`  // one of the base sets, which can't be removed
 	Epoch        uint64          `json:"epoch"`
 	Leader       string          `json:"leader"`
 	Replicas     []ReplicaStatus `json:"replicas"`
@@ -485,7 +567,7 @@ func (m *Membership) Status() []ShardStatus {
 	defer m.mu.RUnlock()
 	out := make([]ShardStatus, 0, len(m.shards))
 	for id, set := range m.shards {
-		s := ShardStatus{ID: id, Epoch: set.epoch, Leader: set.leader, Replicas: []ReplicaStatus{},
+		s := ShardStatus{ID: id, State: set.state, Base: set.base, Epoch: set.epoch, Leader: set.leader, Replicas: []ReplicaStatus{},
 			Unavailable: set.unavailable.Load(), NotCommitted: set.notCommitted.Load()}
 		for rid, info := range set.replicas {
 			silent := m.now().Sub(info.lastSeen)

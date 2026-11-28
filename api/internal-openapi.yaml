@@ -73,18 +73,26 @@ paths:
 
   /internal/v1/shards/{id}:
     delete:
-      summary: Take a shard off the ring
+      summary: Forget a pending or retired replica set
       description: >-
-        Its keys move to the next shards clockwise, without their data (no migration yet),
-        and its leader assignment is forgotten. Not permanent: if its replicas are still
-        running, their next heartbeat adds it back, so stop them first.
+        M5 (ADR-0033): only a set that holds no keys anyone reads can be forgotten: a
+        pending one (registered, never on the ring) or a retired one (its keys moved away by
+        a removal migration). A set on the ring answers 409: it leaves through a migration,
+        which moves its keys first; a base set never leaves. Not permanent: if its replicas
+        are still running, their next heartbeat registers it again as pending, so stop them
+        first. (Before M5 this dropped any set from the ring without moving its data.)
       operationId: removeShard
       tags: [coordinator]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "204": { description: Removed }
+        "204": { description: Forgotten }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The set is on the ring or is a base set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   # --- On a shard: key-value storage ----------------------------------------------------
   /internal/v1/kv/{key}:
@@ -235,9 +243,14 @@ components:
         leaderAddress: { type: string, description: empty until the leader has reported }
     ShardStatus:
       type: object
-      required: [id, epoch, leader, replicas, unavailable503, notCommitted504]
+      required: [id, state, base, epoch, leader, replicas, unavailable503, notCommitted504]
       properties:
         id: { type: string }
+        state:
+          type: string
+          enum: [pending, active, leaving, retired]
+          description: M5 (ADR-0033). Only active and leaving sets are on the ring
+        base: { type: boolean, description: "One of the first expected sets: can't be removed" }
         epoch: { type: integer }
         leader: { type: string }
         unavailable503: { type: integer, description: item requests for this shard answered 503 }

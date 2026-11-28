@@ -23,13 +23,17 @@ import (
 // TransferBudget is the longest a transfer holds the shard's writes (ADR-0036: 2 s).
 const TransferBudget = 2 * time.Second
 
-// TransferError is a transfer that didn't happen, with the HTTP status that says why.
-type TransferError struct {
+// StatusError is a membership operation that didn't happen, with the HTTP status that
+// says why (a transfer, a removal).
+type StatusError struct {
 	Status int
 	Msg    string
 }
 
-func (e *TransferError) Error() string { return e.Msg }
+func (e *StatusError) Error() string { return e.Msg }
+
+// TransferError is the StatusError of a transfer.
+type TransferError = StatusError
 
 // Transfer moves shard id's leadership to replica to:
 //

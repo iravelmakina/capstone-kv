@@ -242,8 +242,8 @@ func TestInternalContract(t *testing.T) {
 		{"shardLog", "GET", follower + "/internal/v1/log?replica=x&epoch=0&lsn=0&hash=0&max=10", "", true},  // 409
 		{"shardPut", "PUT", follower + shard.KeyPath(shard.StorageKey("users", "u2", "")), `{"a":1}`, true}, // 409
 
-		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", false},
-		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", true}, // 404
+		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-2", "", true}, // 409: a base set
+		{"removeShard", "DELETE", co + "/internal/v1/shards/shard-9", "", true}, // 404
 	}
 
 	exercised := map[string]bool{}

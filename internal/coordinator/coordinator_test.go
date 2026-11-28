@@ -454,11 +454,20 @@ func TestCoordinatorRestartKeepsLeader(t *testing.T) {
 	}
 }
 
+// Spec shard-rebalancing "Base set can't leave": the internal DELETE refuses a base set or
+// any set on the ring (before M5 it dropped them without moving their keys), and forgets
+// a pending set.
 func TestExplicitRemove(t *testing.T) {
 	c := newCluster(t, 2, true)
 	code, body := call(t, "DELETE", c.coord.URL+"/internal/v1/shards/shard-2", "")
+	expect(t, code, body, 409)
+	for _, id := range []string{"3a", "3b", "3c"} {
+		c.startNode(t, "shard-3", id)
+	}
+	c.beat(t, "3a", "3b", "3c")
+	code, body = call(t, "DELETE", c.coord.URL+"/internal/v1/shards/shard-3", "")
 	expect(t, code, body, 204)
-	code, body = call(t, "DELETE", c.coord.URL+"/internal/v1/shards/shard-2", "")
+	code, body = call(t, "DELETE", c.coord.URL+"/internal/v1/shards/shard-3", "")
 	expect(t, code, body, 404)
 }
 

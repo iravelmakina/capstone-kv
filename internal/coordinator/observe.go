@@ -95,6 +95,24 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 			}
 			return out
 		})
+	reg.GaugeFunc("kv_shard_state", "1 for each replica set's state: pending, active, leaving or retired (ADR-0033).",
+		[]string{"shard", "state"}, func() []metrics.Sample {
+			var out []metrics.Sample
+			for _, s := range m.Status() {
+				out = append(out, metrics.Sample{Labels: []string{s.ID, s.State}, Value: 1})
+			}
+			return out
+		})
+	reg.Gauge("kv_ring_shards", "Replica sets on the hash ring (active or leaving): the store's capacity in sets.",
+		func() float64 {
+			n := 0
+			for _, s := range m.Status() {
+				if onRing(s.State) {
+					n++
+				}
+			}
+			return float64(n)
+		})
 	reg.GaugeFunc("kv_node_leaders", "Shard leaders running on each node (ADR-0036: at most one where possible).",
 		[]string{"node"}, func() []metrics.Sample {
 			perNode, _ := m.LeaderPlacement()
