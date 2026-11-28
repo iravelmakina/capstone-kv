@@ -38,7 +38,8 @@ type Membership struct {
 	shards map[string]*replicaSet
 	ring   *ring.Ring
 	now    func() time.Time
-	client *http.Client
+	client *http.Client // short timeout: asking followers before a promotion
+	ctl    *http.Client // no timeout of its own: transfer calls carry their own deadline
 }
 
 type replicaSet struct {
@@ -49,6 +50,10 @@ type replicaSet struct {
 	next         atomic.Uint64 // read rotation
 	unavailable  atomic.Uint64 // item requests answered 503
 	notCommitted atomic.Uint64 // writes answered 504
+	// hold is non-nil while the set's writes are held (a planned transfer, ADR-0036);
+	// it is closed when they may go on. transferring is set for the transfer's duration.
+	hold         chan struct{}
+	transferring bool
 }
 
 type replicaInfo struct {
@@ -76,7 +81,7 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 		cfg.FirstLeaderWait = 3 * time.Minute
 	}
 	m := &Membership{cfg: cfg, shards: map[string]*replicaSet{}, ring: r, now: time.Now,
-		client: &http.Client{Timeout: cfg.AskTimeout}}
+		client: &http.Client{Timeout: cfg.AskTimeout}, ctl: &http.Client{}}
 	for _, id := range cfg.Leaders.Keys() {
 		raw, _ := cfg.Leaders.Get(id)
 		var a assignment
@@ -121,7 +126,7 @@ func (m *Membership) Heartbeat(hb shard.Heartbeat) (shard.HeartbeatAnswer, error
 }
 
 func (m *Membership) answerLocked(set *replicaSet) shard.HeartbeatAnswer {
-	a := shard.HeartbeatAnswer{Epoch: set.epoch, Leader: set.leader}
+	a := shard.HeartbeatAnswer{Epoch: set.epoch, Leader: set.leader, Transferring: set.transferring}
 	if info := set.replicas[set.leader]; info != nil {
 		a.LeaderAddress = info.address
 	}
@@ -230,8 +235,8 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 	var jobs []job
 	m.mu.RLock()
 	for id, set := range m.shards {
-		if set.leader == "" || m.liveLocked(set.replicas[set.leader]) {
-			continue
+		if set.leader == "" || set.transferring || m.liveLocked(set.replicas[set.leader]) {
+			continue // a set in a planned transfer is the transfer's to settle
 		}
 		j := job{id: id, epoch: set.epoch, followers: map[string]string{}, busy: m.leaderNodesLocked(id)}
 		for rid, info := range set.replicas {
@@ -265,7 +270,7 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 		best := cands[0].id
 		m.mu.Lock()
 		set := m.shards[j.id]
-		if set != nil && set.epoch == j.epoch && !m.liveLocked(set.replicas[set.leader]) {
+		if set != nil && set.epoch == j.epoch && !set.transferring && !m.liveLocked(set.replicas[set.leader]) {
 			if err := m.setLeaderLocked(j.id, set, best, j.epoch+1); err != nil {
 				log.Print(err)
 			}
@@ -312,6 +317,12 @@ func (m *Membership) Ready() (bool, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, set := range m.shards {
+		if set.transferring {
+			// A planned transfer started with a confirmed live leader; meanwhile writes
+			// wait on the hold and reads need no leader (ADR-0036). Its new leader is
+			// confirmed by the epoch push before the hold is released.
+			continue
+		}
 		if info := set.replicas[set.leader]; set.leader == "" || info == nil || info.epoch < set.epoch {
 			return false, len(m.shards)
 		}

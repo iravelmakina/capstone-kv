@@ -13,6 +13,13 @@ info:
     Replicas also serve GET /health, /health/live, /health/ready and /version, with the
     bodies documented in api/openapi.yaml (M5, spec health-endpoints).
 
+    Planned leader transfer (M5, ADR-0036; internal/shard/transfer.go), coordinator to
+    replica: POST /internal/v1/stepdown?epoch=&target=&wait_ms= (200 {lsn} once the target
+    has acknowledged the leader's last record and it committed; 409 if not in time, and the
+    leader keeps leading), POST /internal/v1/resume?epoch= (204), POST /internal/v1/epoch
+    with {epoch, leader, leaderAddress} (200 {epoch}). Heartbeat answers carry
+    "transferring": true while a transfer of the set runs.
+
 servers:
   - url: http://localhost:8080
     description: coordinator (membership endpoints) or a shard replica (key-value and log endpoints)

@@ -41,6 +41,7 @@ type coordMetrics struct {
 	reg      *metrics.Registry
 	requests *metrics.CounterVec   // kv_requests_total{op,code,shard,principal}
 	latency  *metrics.HistogramVec // kv_request_duration_seconds{op,shard}
+	hold     *metrics.HistogramVec // kv_write_hold_seconds{shard}
 }
 
 func newCoordMetrics(m *Membership) *coordMetrics {
@@ -51,6 +52,8 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 			"Public API requests by operation, status code, shard and API key name.", "op", "code", "shard", "principal"),
 		latency: reg.Histogram("kv_request_duration_seconds",
 			"Public API request latency at the coordinator, by operation and shard.", metrics.LatencyBuckets, "op", "shard"),
+		hold: reg.Histogram("kv_write_hold_seconds",
+			"Time writes waited on a shard's write hold (planned leader transfer, ADR-0036).", metrics.LatencyBuckets, "shard"),
 	}
 	reg.GaugeFunc("kv_replica_up", "1 if the replica has sent a heartbeat within the timeout.",
 		[]string{"shard", "replica", "node"}, func() []metrics.Sample {
@@ -160,6 +163,8 @@ func scopeOf(op, method string) string {
 	case op == "delete":
 		return auth.Delete
 	case op == "table" && method == http.MethodPost:
+		return auth.Admin
+	case op == "admin": // M5 admin routes: leader transfer (ADR-0036)
 		return auth.Admin
 	}
 	return auth.Read

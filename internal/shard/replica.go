@@ -91,6 +91,15 @@ type Replica struct {
 	leaderSince time.Time            // leader: when this replica became leader of the epoch
 	metrics     *replicaMetrics
 
+	// Planned leader transfer (ADR-0036, transfer.go). gate is held shared by every write
+	// from its leader check until its record is appended, and exclusively by a step-down,
+	// so after a step-down no write can still append. steppingDown refuses new writes;
+	// writing counts write handlers still running (appended, waiting for their commit).
+	gate         sync.RWMutex
+	steppingDown bool      // guarded by mu
+	steppedAt    time.Time // guarded by mu: when the step-down began
+	writing      int       // guarded by mu
+
 	onPull func(replica string, lsn uint64) // tests: called on every pull the leader serves; guarded by mu
 }
 
@@ -148,6 +157,7 @@ func (r *Replica) SetRole(epoch uint64, leaderID, leaderAddr string) {
 	}
 	wasLeader := r.isLeaderLocked()
 	r.epoch, r.leaderID, r.leaderAddr = epoch, leaderID, leaderAddr
+	r.steppingDown = false // a new role ends any step-down
 	r.acked = map[string]uint64{}
 	r.caughtUp = map[string]time.Time{}
 	r.leaderSince = time.Now()
@@ -228,6 +238,10 @@ func (r *Replica) Handler() http.Handler {
 		r.write(w, req, store.OpDelete, key, nil, http.StatusNoContent)
 	}))
 	mux.HandleFunc("GET /internal/v1/log", r.observe("log", r.serveLog))
+	// Planned leader transfer (ADR-0036), called by the coordinator only.
+	mux.HandleFunc("POST /internal/v1/stepdown", r.stepDown)
+	mux.HandleFunc("POST /internal/v1/resume", r.resume)
+	mux.HandleFunc("POST /internal/v1/epoch", r.pushEpoch)
 	return mux
 }
 
@@ -263,16 +277,6 @@ func (r *Replica) read(w http.ResponseWriter, req *http.Request) {
 // and append under the store's lock, flush, wait until a follower has it (W = 2), then
 // make it visible and answer with the write's stamp. A follower answers 409.
 func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key string, value []byte, okStatus int) {
-	r.mu.Lock()
-	if !r.isLeaderLocked() {
-		leader := r.leaderID
-		r.mu.Unlock()
-		httpx.WriteError(w, http.StatusConflict, "not the leader (leader is "+leader+")")
-		return
-	}
-	epoch := r.epoch
-	r.mu.Unlock()
-
 	opts, err := writeOpts(req)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -284,8 +288,29 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 		return
 	}
 
+	// The gate is held from the leader check until the record is appended, so a step-down
+	// (which takes it exclusively) never misses a write that passed the check (ADR-0036).
+	r.gate.RLock()
+	r.mu.Lock()
+	if !r.isLeaderLocked() || r.steppingDown {
+		leader, stepping := r.leaderID, r.steppingDown
+		r.mu.Unlock()
+		r.gate.RUnlock()
+		if stepping {
+			httpx.WriteError(w, http.StatusConflict, "stepping down: leadership is moving; retry")
+		} else {
+			httpx.WriteError(w, http.StatusConflict, "not the leader (leader is "+leader+")")
+		}
+		return
+	}
+	epoch := r.epoch
+	r.writing++
+	r.mu.Unlock()
+	defer r.writeDone()
+
 	start := time.Now()
 	rec, head, err := r.st.WriteVersioned(epoch, op, key, value, opts, now)
+	r.gate.RUnlock()
 	reqID := req.Header.Get(httpx.HeaderRequestID)
 	switch {
 	case errors.Is(err, store.ErrPrecondition):
@@ -448,6 +473,11 @@ func (r *Replica) serveLog(w http.ResponseWriter, req *http.Request) {
 		r.acked[follower] = lsn
 		if r.cfg.W >= 2 {
 			r.advanceCommitLocked(lsn) // one follower is enough for W = 2 (ADR-0021)
+		}
+		if r.steppingDown {
+			// A step-down waits for this follower's ack, which may not move the commit
+			// point (the other follower's did already), so wake it explicitly.
+			r.broadcastLocked()
 		}
 	}
 	if _, seen := r.acked[follower]; !seen {
@@ -690,11 +720,13 @@ type Heartbeat struct {
 	Last    store.Version `json:"last"`    // its last durable record
 }
 
-// HeartbeatAnswer is the coordinator's reply: the replica set's epoch and leader.
+// HeartbeatAnswer is the coordinator's reply: the replica set's epoch and leader, and
+// whether a planned leader transfer of the set is in progress (ADR-0036).
 type HeartbeatAnswer struct {
 	Epoch         uint64 `json:"epoch"`
 	Leader        string `json:"leader"`
 	LeaderAddress string `json:"leaderAddress"`
+	Transferring  bool   `json:"transferring,omitempty"`
 }
 
 // HeartbeatLoop reports to the coordinator now and then every interval, until ctx ends,
@@ -703,6 +735,7 @@ type HeartbeatAnswer struct {
 func (r *Replica) HeartbeatLoop(ctx context.Context, coordinatorURL, address string, interval time.Duration) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	send := func() {
+		sentAt := time.Now() // the answer was computed after this (see applyAnswer)
 		last, _ := r.st.Last()
 		r.mu.Lock()
 		hb := Heartbeat{Shard: r.cfg.Shard, Replica: r.cfg.Replica, Address: address, Epoch: r.epoch, Last: last}
@@ -721,7 +754,7 @@ func (r *Replica) HeartbeatLoop(ctx context.Context, coordinatorURL, address str
 			log.Printf("heartbeat to %s: status %d", coordinatorURL, resp.StatusCode)
 			return
 		}
-		r.SetRole(a.Epoch, a.Leader, a.LeaderAddress)
+		r.applyAnswer(a, sentAt)
 	}
 	send()
 	t := time.NewTicker(interval)

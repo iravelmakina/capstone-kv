@@ -39,6 +39,9 @@ func TestContract(t *testing.T) {
 		{"healthReady", "GET", r + "/health/ready", ""},
 		{"healthReady", "GET", n + "/health/ready", ""}, // 503 with a reason
 		{"version", "GET", r + "/version", ""},
+		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"to":"9z"}`}, // 404
+		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"x":1}`},     // 400
+		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`}, // 200 or 409
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`},
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`}, // 409
 		{"createTable", "POST", r + "/v1/tables", `{"name":""}`},                          // 400
@@ -113,13 +116,15 @@ func TestContract(t *testing.T) {
 	send("POST", k+"/v1/tables", `{"name":"users","partitionKey":"userId"}`, "ops-key")
 	send("PUT", k+"/v1/tables/users/items/u1", `{"a":1}`, "ops-key")
 	for _, s := range []struct{ op, method, url, body, key string }{
-		{"listTables", "GET", k + "/v1/tables", "", ""},                                         // 401
-		{"createTable", "POST", k + "/v1/tables", `{"name":"x","partitionKey":"y"}`, "mcp-key"}, // 403
-		{"getTable", "GET", k + "/v1/tables/users", "", "nope"},                                 // 401
-		{"getItem", "GET", k + "/v1/tables/users/items/u1", "", ""},                             // 401
-		{"itemExists", "HEAD", k + "/v1/tables/users/items/u1", "", ""},                         // 401
-		{"deleteItem", "DELETE", k + "/v1/tables/users/items/u1", "", "mcp-key"},                // 403
-		{"putItem", "PUT", k + "/v1/tables/users/items/u1", `{"a":2}`, ""},                      // 401
+		{"listTables", "GET", k + "/v1/tables", "", ""},                                             // 401
+		{"createTable", "POST", k + "/v1/tables", `{"name":"x","partitionKey":"y"}`, "mcp-key"},     // 403
+		{"getTable", "GET", k + "/v1/tables/users", "", "nope"},                                     // 401
+		{"getItem", "GET", k + "/v1/tables/users/items/u1", "", ""},                                 // 401
+		{"itemExists", "HEAD", k + "/v1/tables/users/items/u1", "", ""},                             // 401
+		{"deleteItem", "DELETE", k + "/v1/tables/users/items/u1", "", "mcp-key"},                    // 403
+		{"putItem", "PUT", k + "/v1/tables/users/items/u1", `{"a":2}`, ""},                          // 401
+		{"transferLeader", "POST", k + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`, ""},        // 401
+		{"transferLeader", "POST", k + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`, "mcp-key"}, // 403
 	} {
 		code, _ := send(s.method, s.url, s.body, s.key)
 		if !documented[s.op][code] {

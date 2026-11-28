@@ -23,7 +23,7 @@
 ## 4. Leader placement and transfer
 
 - [x] 4.1 Bounded first-assignment wait (all expected replicas or 3 minutes with a majority) and the tie-break toward leaderless nodes; `kv_node_leaders`; `LeadersColocated` rule — unit tests: a late replica within 3 minutes gets its preferred leadership; equal `(epoch, LSN)` picks the other node; a more up-to-date follower on a busy node still wins; `promtool` test for the alert
-- [ ] 4.2 Step-down on the leader, synchronous epoch push to every replica, planned transfer (`POST /v1/admin/shards/{id}/leader`) with the ≤ 2 s write hold and abandon path — tests: a write injected while the leader steps down is either on the new leader or refused and retried, never lost; a lagging target abandons without raising the epoch; a writer loops through 20 transfers with every acknowledged write read back and no 5xx
+- [x] 4.2 Step-down on the leader, synchronous epoch push to every replica, planned transfer (`POST /v1/admin/shards/{id}/leader`) with the ≤ 2 s write hold and abandon path — tests: a write injected while the leader steps down is either on the new leader or refused and retried, never lost; a lagging target abandons without raising the epoch; a writer loops through 20 transfers with every acknowledged write read back and no 5xx
 
 ## 5. Pending sets and rebalancing
 

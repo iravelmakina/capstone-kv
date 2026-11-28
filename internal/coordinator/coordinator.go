@@ -6,6 +6,7 @@ package coordinator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,10 @@ func (c *Coordinator) Handler() http.Handler {
 		mux.HandleFunc("GET "+p, c.observe(itemOp, c.item))
 		mux.HandleFunc("DELETE "+p, c.observe(itemOp, c.item))
 	}
+
+	// Admin (M5): planned leader transfer, admin scope (ADR-0036).
+	admin := func(*http.Request) string { return "admin" }
+	mux.HandleFunc("POST /v1/admin/shards/{id}/leader", c.observe(admin, c.transferLeader))
 
 	mux.HandleFunc("POST /internal/v1/replicas", c.heartbeat)
 	mux.HandleFunc("GET /internal/v1/shards", c.listShards)
@@ -231,25 +236,51 @@ func (c *Coordinator) item(w http.ResponseWriter, r *http.Request) {
 }
 
 // write sends a put or delete to the shard's leader and relays the answer (ADR-0021).
+// During a planned leader transfer (ADR-0036) it waits out the shard's write hold first;
+// a write the old leader refused with 409 (it was stepping down when the write reached it)
+// waits for the hold too and goes once more to whoever leads then: the refused write was
+// never appended, so sending it again can't apply it twice.
 func (c *Coordinator) write(w http.ResponseWriter, ri *reqInfo, in http.Header, method string, routing []byte, path string, body []byte) {
-	id, addr, ok := c.members.WriteTarget(routing)
-	ri.shard = id
-	if !ok {
-		c.fail(w, id, http.StatusServiceUnavailable, "shard "+id+" has no live leader")
-		return
-	}
-	req, _ := http.NewRequest(method, addr+path, bytes.NewReader(body))
-	req.Header.Set(httpx.HeaderRequestID, ri.id)
-	for _, h := range versionRequestHeaders { // a retry's stamp, conditions (ADR-0028)
-		if v := in.Get(h); v != "" {
-			req.Header.Set(h, v)
+	ctx := context.Background()
+	var resp *http.Response
+	var id string
+	for attempt := 0; ; attempt++ {
+		var addr string
+		var ok bool
+		id, addr, ok = c.members.WriteTarget(routing)
+		ri.shard = id
+		if held := c.members.WaitHold(ctx, id); held > 0 {
+			c.metrics.hold.With(id).Observe(held.Seconds())
+			id, addr, ok = c.members.WriteTarget(routing)
 		}
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		// Alive by heartbeat but not answering: same honest answer, try later.
-		c.fail(w, id, http.StatusServiceUnavailable, "leader of "+id+" did not answer")
-		return
+		if !ok {
+			c.fail(w, id, http.StatusServiceUnavailable, "shard "+id+" has no live leader")
+			return
+		}
+		req, _ := http.NewRequest(method, addr+path, bytes.NewReader(body))
+		req.Header.Set(httpx.HeaderRequestID, ri.id)
+		for _, h := range versionRequestHeaders { // a retry's stamp, conditions (ADR-0028)
+			if v := in.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
+		}
+		var err error
+		resp, err = c.client.Do(req)
+		if err != nil {
+			// Alive by heartbeat but not answering: same honest answer, try later.
+			c.fail(w, id, http.StatusServiceUnavailable, "leader of "+id+" did not answer")
+			return
+		}
+		if resp.StatusCode != http.StatusConflict || attempt > 0 {
+			break
+		}
+		// 409: not (or no longer) the leader. Retry only if leadership is moving or moved.
+		held := c.members.WaitHold(ctx, id)
+		_, now, _ := c.members.WriteTarget(routing)
+		if held == 0 && now == addr {
+			break // nothing changed: answer as before
+		}
+		resp.Body.Close()
 	}
 	defer resp.Body.Close()
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -434,6 +465,33 @@ func (c *Coordinator) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, answer)
+}
+
+// transferLeader is POST /v1/admin/shards/{id}/leader {"to": "<replica>"}: a planned
+// leader transfer (ADR-0036). 200 with the new epoch and leader; 404 for an unknown shard
+// or replica; 409 when it can't happen or was abandoned (the old leader still leads).
+func (c *Coordinator) transferLeader(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || !validName.MatchString(body.To) {
+		httpx.WriteError(w, http.StatusBadRequest, `body must be {"to": "<replica ID>"}`)
+		return
+	}
+	id := r.PathValue("id")
+	info(r).shard = id
+	ans, err := c.members.Transfer(r.Context(), id, body.To)
+	var te *TransferError
+	switch {
+	case errors.As(err, &te):
+		httpx.WriteError(w, te.Status, te.Msg)
+	case err != nil:
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+	default:
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"shard": id, "leader": ans.Leader, "epoch": ans.Epoch})
+	}
 }
 
 func (c *Coordinator) listShards(w http.ResponseWriter, r *http.Request) {

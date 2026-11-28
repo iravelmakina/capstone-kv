@@ -9,7 +9,7 @@ info:
 
     Every request except /health, /health/live, /health/ready and /version needs an API key, `Authorization: Bearer <key>`, whose
     scopes allow it: read (GET, HEAD, table lists), write (PUT on items), delete (DELETE
-    on items), admin (creating tables) (ADR-0027). Every answer carries `X-Request-ID`:
+    on items), admin (creating tables, /v1/admin/...) (ADR-0027). Every answer carries `X-Request-ID`:
     the client's own, or one the coordinator made; it names the request in the logs.
 
     Versions (ADR-0028): every write is stamped by the shard's leader with a hybrid
@@ -154,6 +154,56 @@ paths:
   # Tables with a sort key: the item is addressed by partition key + sort key.
   /v1/tables/{table}/items/{pk}/{sk}:
     $ref: "#/components/pathItems/ItemByFullKey"
+
+  /v1/admin/shards/{id}/leader:
+    post:
+      summary: Move a shard's leadership to a live follower (planned leader transfer)
+      description: >-
+        ADR-0036. Holds the shard's writes (at most 2 s), has the leader step down once the
+        target holds every write it accepted, raises the epoch with the target as leader and
+        tells every replica at once. Writes that arrive meanwhile wait and then go to the new
+        leader. If the target can't catch up in time the transfer is abandoned and the old
+        leader keeps leading (409). Needs the admin scope.
+      operationId: transferLeader
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: shard-1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              additionalProperties: false
+              properties:
+                to: { type: string, description: The follower that will lead, e.g. 1a }
+      responses:
+        "200":
+          description: Transferred
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [shard, leader, epoch]
+                properties:
+                  shard: { type: string }
+                  leader: { type: string }
+                  epoch: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such shard or replica
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            Not possible now (target already leads, isn't live, the leader isn't live, another
+            transfer runs) or abandoned (the target didn't catch up); the old leader still leads
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
 components:
   parameters:

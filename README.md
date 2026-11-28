@@ -118,6 +118,8 @@ curl localhost:8080/internal/v1/shards     # leader, epoch, each replica's last 
 curl 127.0.0.1:8112/health                 # one replica: role, epoch, last LSN, lag, commit wait
 curl 127.0.0.1:8112/health/ready           # M5: 200 once it knows its leader, else 503 + reason
 curl localhost:8080/version                # M5: commit, build time, Go version, role (any node)
+curl -X POST localhost:8080/v1/admin/shards/shard-1/leader -H "Authorization: Bearer $(cat secrets/ops.key)" \
+     -d '{"to":"1b"}'                      # M5: planned leader transfer (ADR-0036), admin key
 docker compose stop r1c                    # a follower down: puts and reads still work
 docker compose start r1c                   # it pulls what it missed
 make rebuild-replica R=1b                  # wipe a replica and resync it from the leader
