@@ -27,7 +27,10 @@ const (
 	Read   = "read"   // GET and HEAD on items; list and describe tables
 	Write  = "write"  // PUT on items
 	Delete = "delete" // DELETE on items
-	Admin  = "admin"  // create tables
+	Admin  = "admin"  // create tables; M5 admin actions (migrations, leader transfer)
+	// Status reads the cluster state on the admin API and nothing else: no item, no admin
+	// action (M5, ADR-0034: the ops agent's key). An admin key may read it too.
+	Status = "status"
 )
 
 // Key is one API key as stored: its name, the hash of its value, and what it may do.
@@ -37,8 +40,11 @@ type Key struct {
 	Scopes []string `json:"scopes"`
 }
 
-// Allows reports whether the key has the scope.
-func (k Key) Allows(scope string) bool { return slices.Contains(k.Scopes, scope) }
+// Allows reports whether the key has the scope. Admin includes Status: whoever may change
+// the cluster may also look at it.
+func (k Key) Allows(scope string) bool {
+	return slices.Contains(k.Scopes, scope) || (scope == Status && slices.Contains(k.Scopes, Admin))
+}
 
 // Hash returns the hex SHA-256 of a key value, the form the keys file holds.
 func Hash(value string) string {

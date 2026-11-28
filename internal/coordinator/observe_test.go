@@ -90,7 +90,8 @@ func keyed(t *testing.T, c *cluster) func(method, url, body, key string) (int, s
 	path := filepath.Join(t.TempDir(), "keys.json")
 	os.WriteFile(path, []byte(`[
 		{"name":"ops","sha256":"`+auth.Hash("ops-key")+`","scopes":["read","write","delete","admin"]},
-		{"name":"mcp","sha256":"`+auth.Hash("mcp-key")+`","scopes":["read","write"]}]`), 0o600)
+		{"name":"mcp","sha256":"`+auth.Hash("mcp-key")+`","scopes":["read","write"]},
+		{"name":"ops-agent","sha256":"`+auth.Hash("status-key")+`","scopes":["status"]}]`), 0o600)
 	keys, err := auth.Load(path)
 	if err != nil {
 		t.Fatal(err)

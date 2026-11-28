@@ -182,8 +182,10 @@ func scopeOf(op, method string) string {
 		return auth.Delete
 	case op == "table" && method == http.MethodPost:
 		return auth.Admin
-	case op == "admin": // M5 admin routes: leader transfer (ADR-0036)
+	case op == "admin": // M5 admin actions: migrations, leader transfer
 		return auth.Admin
+	case op == "status": // M5 admin reads: cluster state, migration
+		return auth.Status
 	}
 	return auth.Read
 }

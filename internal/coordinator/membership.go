@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,8 @@ type Membership struct {
 	shards map[string]*replicaSet
 	ring   *ring.Ring
 	now    func() time.Time
+	mig    *Migration   // the running migration, or the last one (ADR-0033); guarded by mu
+	after  *ring.Ring   // a running migration's ring after the change; nil otherwise
 	client *http.Client // short timeout: asking followers before a promotion
 	ctl    *http.Client // no timeout of its own: transfer calls carry their own deadline
 }
@@ -99,6 +102,9 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 	m := &Membership{cfg: cfg, shards: map[string]*replicaSet{}, ring: r, now: time.Now,
 		client: &http.Client{Timeout: cfg.AskTimeout}, ctl: &http.Client{}}
 	for _, id := range cfg.Leaders.Keys() {
+		if strings.HasPrefix(id, "~") {
+			continue // not a set: the migration record (migration.go)
+		}
 		raw, _ := cfg.Leaders.Get(id)
 		var a assignment
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -109,6 +115,9 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 		}
 		set := m.addSetLocked(id, a.State, a.Base)
 		set.leader, set.epoch = a.Leader, a.Epoch
+	}
+	if err := m.loadMigrationLocked(); err != nil {
+		return nil, err
 	}
 	return m, nil
 }
@@ -375,6 +384,8 @@ func (m *Membership) Remove(id string) error {
 		return &StatusError{http.StatusConflict, id + " is a base set: only sets added later can be removed"}
 	case onRing(set.state):
 		return &StatusError{http.StatusConflict, id + " is on the ring: remove it with a migration, which moves its keys first"}
+	case m.mig.Running() && m.mig.Shard == id:
+		return &StatusError{http.StatusConflict, id + " is in migration " + m.mig.ID}
 	}
 	m.cfg.Leaders.Delete(id)
 	delete(m.shards, id)
@@ -479,12 +490,12 @@ func (m *Membership) LeaderPlacement() (perNode map[string]int, colocated []stri
 // WriteTarget returns the shard owning routingKey and its leader's address, if the leader
 // is alive.
 func (m *Membership) WriteTarget(routingKey []byte) (id, addr string, ok bool) {
-	id, found := m.ring.Lookup(routingKey)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, found := m.ownerLocked(routingKey)
 	if !found {
 		return "", "", false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	set := m.shards[id]
 	if set == nil || set.leader == "" {
 		return id, "", false
@@ -499,12 +510,12 @@ func (m *Membership) WriteTarget(routingKey []byte) (id, addr string, ok bool) {
 // ReadTargets returns the shard owning routingKey and its live replicas' addresses, in
 // rotating order so that taking the first R spreads reads evenly over all of them.
 func (m *Membership) ReadTargets(routingKey []byte) (id string, addrs []string) {
-	id, found := m.ring.Lookup(routingKey)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, found := m.ownerLocked(routingKey)
 	if !found {
 		return "", nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	set := m.shards[id]
 	if set == nil {
 		return id, nil

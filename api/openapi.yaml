@@ -9,7 +9,8 @@ info:
 
     Every request except /health, /health/live, /health/ready and /version needs an API key, `Authorization: Bearer <key>`, whose
     scopes allow it: read (GET, HEAD, table lists), write (PUT on items), delete (DELETE
-    on items), admin (creating tables, /v1/admin/...) (ADR-0027). Every answer carries `X-Request-ID`:
+    on items), admin (creating tables, /v1/admin/... changes) (ADR-0027), status (reading
+    /v1/admin/cluster and the migration, nothing else; admin includes it) (ADR-0034). Every answer carries `X-Request-ID`:
     the client's own, or one the coordinator made; it names the request in the logs.
 
     Versions (ADR-0028): every write is stamped by the shard's leader with a hybrid
@@ -154,6 +155,100 @@ paths:
   # Tables with a sort key: the item is addressed by partition key + sort key.
   /v1/tables/{table}/items/{pk}/{sk}:
     $ref: "#/components/pathItems/ItemByFullKey"
+
+  /v1/admin/cluster:
+    get:
+      summary: Every replica set with its state, leader and replicas; the ring; the migration
+      operationId: clusterState
+      security: [{ ApiKey: [] }]
+      responses:
+        "200":
+          description: Cluster state (needs the status or admin scope)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/admin/migrations:
+    post:
+      summary: Start a ring change - a pending set joins, or a set added later leaves
+      description: >-
+        ADR-0033. Only the keys whose owner changes move; each old owner keeps serving them
+        until its cutover. One migration at a time. triggerRate (requests per second) is set
+        by the autoscaler, for its scale-in rule (ADR-0032). Needs the admin scope.
+      operationId: startMigration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                add: { type: string, description: A pending set, e.g. shard-3 }
+                remove: { type: string, description: A set on the ring that isn't a base set }
+                triggerRate: { type: number, minimum: 0 }
+      responses:
+        "201":
+          description: Started
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Migration" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            Another migration runs, or the set can't join or leave now (not pending, no
+            confirmed leader or quorum, a base set, not active)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/admin/migrations/current:
+    get:
+      summary: The running migration, or the last one
+      operationId: currentMigration
+      responses:
+        "200":
+          description: The migration (needs the status or admin scope)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Migration" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No migration has run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      summary: Abort the running migration (only before any source has cut over)
+      operationId: abortMigration
+      responses:
+        "200":
+          description: Aborted; the old ring stays (needs the admin scope)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Migration" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No migration is running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: A source has cut over; the migration can only finish
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/admin/shards/{id}/leader:
     post:
@@ -507,6 +602,47 @@ components:
         version:
           type: string
           description: Commit SHA the running binary was built from ("dev" for local builds)
+    ClusterState:
+      type: object
+      required: [sets, ring, migration]
+      properties:
+        sets:
+          type: array
+          items:
+            type: object
+            description: A replica set, as in GET /internal/v1/shards (internal-openapi.yaml ShardStatus)
+            additionalProperties: true
+        ring: { type: array, items: { type: string } }
+        migration:
+          oneOf: [{ $ref: "#/components/schemas/Migration" }, { type: "null" }]
+    Migration:
+      type: object
+      required: [id, kind, shard, before, after, vnodes, phase, sources, started, requestedBy]
+      properties:
+        id: { type: string, examples: [add-shard-3-1764331200] }
+        kind: { type: string, enum: [add, remove] }
+        shard: { type: string }
+        before: { type: array, items: { type: string } }
+        after: { type: array, items: { type: string } }
+        vnodes: { type: integer }
+        phase: { type: string, enum: [copying, cutover, purging, done, aborted] }
+        sources:
+          type: object
+          description: Per source set, how far it is
+          additionalProperties:
+            type: object
+            properties:
+              commitPoint: { type: integer }
+              copied: { type: integer }
+              left: { type: integer }
+              tailLSN: { type: integer }
+              cutOver: { type: boolean }
+              purged: { type: boolean }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+        requestedBy: { type: string }
+        triggerRate: { type: number }
+        reason: { type: string }
     Readiness:
       type: object
       required: [status, role, ready]

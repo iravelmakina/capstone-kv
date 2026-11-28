@@ -113,6 +113,18 @@ func (r *Ring) Lookup(key []byte) (string, bool) {
 	return r.points[i].shard, true
 }
 
+// VirtualNodes is the number of points each shard has on the ring.
+func (r *Ring) VirtualNodes() int { return r.vnodes }
+
+// Of builds a ring with the given shards (a migration's "before" or "after", ADR-0033).
+func Of(vnodes int, shards []string) *Ring {
+	r := New(vnodes)
+	for _, s := range shards {
+		r.Add(s)
+	}
+	return r
+}
+
 // Shards returns the shard IDs on the ring, sorted.
 func (r *Ring) Shards() []string {
 	r.mu.RLock()

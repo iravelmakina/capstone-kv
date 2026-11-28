@@ -96,6 +96,11 @@ func (c *Coordinator) Handler() http.Handler {
 	// Admin (M5): planned leader transfer, admin scope (ADR-0036).
 	admin := func(*http.Request) string { return "admin" }
 	mux.HandleFunc("POST /v1/admin/shards/{id}/leader", c.observe(admin, c.transferLeader))
+	status := func(*http.Request) string { return "status" }
+	mux.HandleFunc("GET /v1/admin/cluster", c.observe(status, c.cluster))
+	mux.HandleFunc("POST /v1/admin/migrations", c.observe(admin, c.startMigration))
+	mux.HandleFunc("GET /v1/admin/migrations/current", c.observe(status, c.currentMigration))
+	mux.HandleFunc("DELETE /v1/admin/migrations/current", c.observe(admin, c.abortMigration))
 
 	mux.HandleFunc("POST /internal/v1/replicas", c.heartbeat)
 	mux.HandleFunc("GET /internal/v1/shards", c.listShards)

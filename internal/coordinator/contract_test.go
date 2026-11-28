@@ -30,6 +30,10 @@ func TestContract(t *testing.T) {
 		call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"orders","partitionKey":"customerId","sortKey":"orderId"}`)
 	}
 	r, n := ready.coord.URL, notReady.coord.URL
+	for _, id := range []string{"3a", "3b", "3c"} { // a pending set for the migration steps
+		ready.startNode(t, "shard-3", id)
+	}
+	ready.beat(t, "3a", "3b", "3c")
 
 	type step struct{ op, method, url, body string }
 	steps := []step{
@@ -42,6 +46,15 @@ func TestContract(t *testing.T) {
 		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"to":"9z"}`}, // 404
 		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"x":1}`},     // 400
 		{"transferLeader", "POST", r + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`}, // 200 or 409
+		{"clusterState", "GET", r + "/v1/admin/cluster", ""},
+		{"currentMigration", "GET", r + "/v1/admin/migrations/current", ""},         // 404: none yet
+		{"abortMigration", "DELETE", r + "/v1/admin/migrations/current", ""},        // 404: none running
+		{"startMigration", "POST", r + "/v1/admin/migrations", `{"add":"shard-9"}`}, // 404
+		{"startMigration", "POST", r + "/v1/admin/migrations", `{"add":"shard-1"}`}, // 409: active
+		{"startMigration", "POST", r + "/v1/admin/migrations", `{}`},                // 400
+		{"startMigration", "POST", r + "/v1/admin/migrations", `{"add":"shard-3"}`}, // 201 (shard-3 pending)
+		{"currentMigration", "GET", r + "/v1/admin/migrations/current", ""},         // 200
+		{"abortMigration", "DELETE", r + "/v1/admin/migrations/current", ""},        // 200
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`},
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`}, // 409
 		{"createTable", "POST", r + "/v1/tables", `{"name":""}`},                          // 400
@@ -125,6 +138,14 @@ func TestContract(t *testing.T) {
 		{"putItem", "PUT", k + "/v1/tables/users/items/u1", `{"a":2}`, ""},                          // 401
 		{"transferLeader", "POST", k + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`, ""},        // 401
 		{"transferLeader", "POST", k + "/v1/admin/shards/shard-1/leader", `{"to":"1b"}`, "mcp-key"}, // 403
+		{"clusterState", "GET", k + "/v1/admin/cluster", "", ""},                                    // 401
+		{"clusterState", "GET", k + "/v1/admin/cluster", "", "mcp-key"},                             // 403
+		{"startMigration", "POST", k + "/v1/admin/migrations", `{"add":"shard-3"}`, ""},             // 401
+		{"startMigration", "POST", k + "/v1/admin/migrations", `{"add":"shard-3"}`, "mcp-key"},      // 403
+		{"currentMigration", "GET", k + "/v1/admin/migrations/current", "", ""},                     // 401
+		{"currentMigration", "GET", k + "/v1/admin/migrations/current", "", "mcp-key"},              // 403
+		{"abortMigration", "DELETE", k + "/v1/admin/migrations/current", "", ""},                    // 401
+		{"abortMigration", "DELETE", k + "/v1/admin/migrations/current", "", "status-key"},          // 403
 	} {
 		code, _ := send(s.method, s.url, s.body, s.key)
 		if !documented[s.op][code] {
