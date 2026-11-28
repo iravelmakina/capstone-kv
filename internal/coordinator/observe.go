@@ -3,8 +3,10 @@ package coordinator
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -278,6 +280,41 @@ func (c *Coordinator) authorize(w http.ResponseWriter, r *http.Request, ri *reqI
 		return false
 	}
 	return true
+}
+
+// SDHandler is Prometheus' HTTP service discovery for the replicas (ADR-0035): every
+// replica of a set that isn't retired, at its metrics port (its API port + 1100: 9181-9183
+// in AWS, 9180 inside each local container). New replica sets are scraped as soon as they
+// register, without editing a target list. Served on the metrics port, next to /metrics.
+func (c *Coordinator) SDHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targets := []string{}
+		for _, s := range c.members.Status() {
+			if s.State == StateRetired {
+				continue
+			}
+			for _, r := range s.Replicas {
+				if t := metricsTarget(r.Address); t != "" {
+					targets = append(targets, t)
+				}
+			}
+		}
+		sort.Strings(targets)
+		httpx.WriteJSON(w, http.StatusOK, []map[string]any{{"targets": targets}})
+	})
+}
+
+// metricsTarget is host:port of a replica's metrics listener, from its API address.
+func metricsTarget(address string) string {
+	u, err := url.Parse(address)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		return ""
+	}
+	return net.JoinHostPort(u.Hostname(), strconv.Itoa(port+1100))
 }
 
 // MetricsHandler serves the coordinator's metrics, on the metrics port (ADR-0025).

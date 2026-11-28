@@ -60,13 +60,14 @@ ips() {
 }
 for _ in $(seq 60); do
   COORD=$(ips velmakina-kv-coordinator)
-  NODES=$(ips 'velmakina-kv-node-*')
+  NODES=$(ips 'velmakina-kv-node-a,velmakina-kv-node-b,velmakina-kv-node-c')   # the base nodes (shard-3's come and go)
   [ -n "$COORD" ] && [ "$(echo $NODES | wc -w)" -eq 3 ] && break
   sleep 5
 done
 echo "[{\"targets\": [\"$COORD:9180\"]}]" > "$ROOT/targets/coordinator.json"
-REPLICAS=$(for ip in $NODES; do printf '"%s:9181", "%s:9182", ' "$ip" "$ip"; done | sed 's/, $//')
-echo "[{\"targets\": [$REPLICAS]}]" > "$ROOT/targets/replicas.json"
+# Replicas: from the coordinator's service discovery (/sd on its metrics port, ADR-0035),
+# so shard-3's instances are scraped when they register. Prometheus reaches it as
+# "coordinator" (--add-host below), the same name the local Compose stack uses.
 echo "[{\"targets\": [\"http://$COORD:8080/v1/tables/probe/items/probe\"]}]" > "$ROOT/targets/probe.json"
 echo "monitor-boot: coordinator $COORD, nodes $NODES"
 
@@ -83,7 +84,7 @@ chown 65534:65534 "$ROOT/data/prometheus"
 chown 10001:10001 "$ROOT/data/loki"
 M=$ROOT/monitoring
 run() { docker run -d --restart always --network kvmon --name "$@"; }
-run prometheus -p 127.0.0.1:9090:9090 \
+run prometheus -p 127.0.0.1:9090:9090 --add-host "coordinator:$COORD" \
   -v "$M/prometheus.yml:/etc/prometheus/prometheus.yml:ro" -v "$M/rules.yml:/etc/prometheus/rules.yml:ro" \
   -v "$ROOT/targets:/etc/prometheus/targets:ro" -v "$ROOT/data/prometheus:/prometheus" \
   prom/prometheus:v3.1.0 --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.retention.time=24h

@@ -1,5 +1,6 @@
-# Loki, single process, files on local disk, 24 h retention (ADR-0029): the monitor lives a
-# few hours per lab session, and evidence is exported before teardown.
+# Loki, single process, files on local disk (ADR-0029). M5: 12 h retention (was 24 h): a lab
+# session is at most ~4 h, and M5's longer load tests must not fill the monitor's disk
+# (design, "Monitor capacity"); evidence is exported before teardown.
 auth_enabled: false
 
 server:
@@ -27,7 +28,7 @@ schema_config:
         period: 24h
 
 limits_config:
-  retention_period: 24h
+  retention_period: 12h
   allow_structured_metadata: true
 
 compactor:

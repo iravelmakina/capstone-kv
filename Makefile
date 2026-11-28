@@ -190,6 +190,11 @@ AMI_PARAMETER := /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-
 
 up-app:          ## deploy the app stack running VERSION (BENCH=true adds the client)
 	@set -euo pipefail; \
+	scaled=$$($(AWS) autoscaling describe-auto-scaling-groups --auto-scaling-group-names \
+	  $(APP_STACK)-shard-3a $(APP_STACK)-shard-3b $(APP_STACK)-shard-3c \
+	  --query 'sum(AutoScalingGroups[].length(Instances))' --output text 2>/dev/null || echo 0); \
+	if [ "$$scaled" != 0 ] && [ "$$scaled" != None ] && [ "$(SCALED_OK)" != yes ]; then \
+	  echo "shard-3 has $$scaled instance(s): remove it first (make autoscale scales in; ADR-0035), or SCALED_OK=yes"; exit 1; fi; \
 	$(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null || \
 	  { echo "release $(VERSION) not in S3: run make release"; exit 1; }; \
 	status=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE); \

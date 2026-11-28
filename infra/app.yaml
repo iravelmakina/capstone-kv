@@ -2,9 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   capstone-kv app: a coordinator in a public subnet and three shard nodes, one per private
   subnet and AZ, each running one replica of each of the 2 shards (ADR-0020), on the
-  release named by AppVersion, and optionally the monitor (ADR-0029). Network IDs come
-  from the network stack's exports (ADR-0003); the image comes from the artifacts bucket.
-  ADRs 0014, 0020, 0021, 0029.
+  release named by AppVersion, and optionally the monitor (ADR-0029). M5: a third replica
+  set (shard-3) as three single-subnet Auto Scaling groups of at most one instance each,
+  launched by the scaling executor (ADR-0035). Network IDs come from the network stack's
+  exports (ADR-0003); the image comes from the artifacts bucket.
+  ADRs 0014, 0020, 0021, 0029, 0035.
 
 Parameters:
   AppVersion:
@@ -28,6 +30,12 @@ Parameters:
     Type: String
     Default: t3.small
     AllowedValues: [t3.small, t3.medium]   # the lab denies anything bigger (M1 evidence 39-40)
+  CoordinatorInstanceType:
+    # M5 (ADR-0035): the coordinator saturates first (M2: credits used up at ~1,800 ops/s),
+    # so it must not be what limits the p99 the autoscaler acts on.
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium]
   ImageId:
     # A concrete AMI ID, not "latest" (ADR-0017): an SSM-typed parameter is resolved again
     # on every update, and a new AMI would replace every instance and wipe the shards' logs.
@@ -116,10 +124,10 @@ Resources:
       VpcId: !ImportValue
         Fn::Sub: ${NetworkStack}-VpcId
       SecurityGroupIngress:
-        - Description: replica API from the coordinator
+        - Description: replica API from the coordinator (shards 1-3 on 8081-8083)
           IpProtocol: tcp
           FromPort: 8081
-          ToPort: 8082
+          ToPort: 8083
           SourceSecurityGroupId: !Ref CoordinatorSecurityGroup
       Tags:
         - { Key: Name, Value: velmakina-kv-shard-sg }
@@ -129,10 +137,10 @@ Resources:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref ShardSecurityGroup
-      Description: log pulls between replicas
+      Description: log pulls and migration between replicas
       IpProtocol: tcp
       FromPort: 8081
-      ToPort: 8082
+      ToPort: 8083
       SourceSecurityGroupId: !Ref ShardSecurityGroup
 
   # --- Monitoring (ADR-0029) ----------------------------------------------------------
@@ -188,10 +196,10 @@ Resources:
     Condition: WithMonitoring
     Properties:
       GroupId: !Ref ShardSecurityGroup
-      Description: replica metrics ports (shard-1 9181, shard-2 9182), scraped by the monitor
+      Description: replica metrics ports (shards 1-3 on 9181-9183), scraped by the monitor
       IpProtocol: tcp
       FromPort: 9181
-      ToPort: 9182
+      ToPort: 9183
       SourceSecurityGroupId: !Ref MonitorSecurityGroup
 
   # --- Instances ------------------------------------------------------------------------
@@ -203,7 +211,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref ImageId
-      InstanceType: !Ref InstanceType
+      InstanceType: !Ref CoordinatorInstanceType
       IamInstanceProfile: Inventory-App-Role     # the only role the lab lets us pass (M1)
       CreditSpecification: { CPUCredits: unlimited }   # benchmarks aren't throttled (M1 budget)
       NetworkInterfaces:
@@ -357,6 +365,112 @@ Resources:
   # Runs go-ycsb inside the VPC, so the numbers measure the store, not the internet. No
   # inbound ports: it's driven through SSM. Public subnet B (a different AZ from the
   # coordinator), with a public IP only so its SSM agent can reach AWS.
+  # --- M5: the extra replica set (ADR-0035) -------------------------------------------------
+  # shard-3 is three Auto Scaling groups, one per private subnet, of at most one instance.
+  # The scaling executor (cmd/kvscale, run by the author) sets their desired capacity to 1
+  # or 0; nothing else does: there are no scaling policies, DesiredCapacity is left out of
+  # the template (so a stack update never changes it), new instances are protected from
+  # scale-in, and kvscale suspends ReplaceUnhealthy and AZRebalance on each group before it
+  # acts (CloudFormation has no property for suspended processes). Each instance learns its
+  # replica ID, shard and port from its group's tags, through instance-metadata tags.
+  ShardSetTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-shard-set
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Name: Inventory-App-Role }
+        CreditSpecification: { CpuCredits: unlimited }
+        SecurityGroupIds: [!Ref ShardSecurityGroup]
+        MetadataOptions:
+          HttpTokens: required
+          InstanceMetadataTags: enabled          # node-boot.sh reads kv-shard, kv-replica, kv-port
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              Content-Type: multipart/mixed; boundary="//"
+              MIME-Version: 1.0
+
+              --//
+              Content-Type: text/cloud-config; charset="us-ascii"
+
+              #cloud-config
+              cloud_final_modules:
+              - [scripts-user, always]
+
+              --//
+              Content-Type: text/x-shellscript; charset="us-ascii"
+
+              #!/bin/bash
+              set -euxo pipefail
+              aws s3 cp s3://${Bucket}/releases/${AppVersion}/node-boot.sh /usr/local/bin/node-boot.sh --region ${AWS::Region}
+              KV_MONITOR_IP=${MonitorIp} bash /usr/local/bin/node-boot.sh ${Bucket} ${AppVersion} node-from-tags ${Coordinator.PrivateIp} ${W}
+              --//--
+            - Bucket: !ImportValue
+                Fn::Sub: ${ArtifactsStack}-BucketName
+              MonitorIp: !If [WithMonitoring, !GetAtt MonitorInstance.PrivateIp, none]
+
+  ShardSet3A:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-shard-3a
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ShardSetTemplate
+        Version: !GetAtt ShardSetTemplate.LatestVersionNumber
+      MinSize: "0"
+      MaxSize: "1"
+      NewInstancesProtectedFromScaleIn: true
+      HealthCheckType: EC2
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: ${NetworkStack}-PrivateSubnetA
+      Tags:
+        - { Key: Name, Value: velmakina-kv-node-3a, PropagateAtLaunch: true }
+        - { Key: kv-shard, Value: shard-3, PropagateAtLaunch: true }
+        - { Key: kv-replica, Value: 3a, PropagateAtLaunch: true }
+        - { Key: kv-port, Value: "8083", PropagateAtLaunch: true }
+
+  ShardSet3B:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-shard-3b
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ShardSetTemplate
+        Version: !GetAtt ShardSetTemplate.LatestVersionNumber
+      MinSize: "0"
+      MaxSize: "1"
+      NewInstancesProtectedFromScaleIn: true
+      HealthCheckType: EC2
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: ${NetworkStack}-PrivateSubnetB
+      Tags:
+        - { Key: Name, Value: velmakina-kv-node-3b, PropagateAtLaunch: true }
+        - { Key: kv-shard, Value: shard-3, PropagateAtLaunch: true }
+        - { Key: kv-replica, Value: 3b, PropagateAtLaunch: true }
+        - { Key: kv-port, Value: "8083", PropagateAtLaunch: true }
+
+  ShardSet3C:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-shard-3c
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ShardSetTemplate
+        Version: !GetAtt ShardSetTemplate.LatestVersionNumber
+      MinSize: "0"
+      MaxSize: "1"
+      NewInstancesProtectedFromScaleIn: true
+      HealthCheckType: EC2
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: ${NetworkStack}-PrivateSubnetC
+      Tags:
+        - { Key: Name, Value: velmakina-kv-node-3c, PropagateAtLaunch: true }
+        - { Key: kv-shard, Value: shard-3, PropagateAtLaunch: true }
+        - { Key: kv-replica, Value: 3c, PropagateAtLaunch: true }
+        - { Key: kv-port, Value: "8083", PropagateAtLaunch: true }
+
   ClientSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Condition: WithBenchmarkClient
@@ -396,6 +510,11 @@ Resources:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: Inventory-App-Role     # S3 release files, secrets, describe-instances
       CreditSpecification: { CPUCredits: unlimited }
+      # M5 (design, "Monitor capacity"): Loki grew ~0.8 GB/h in M4 on an 8 GB disk; M5's load
+      # tests run longer and heavier. 30 GB gp3 holds a full session with Loki's 12 h retention.
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 30, VolumeType: gp3, DeleteOnTermination: true }
       NetworkInterfaces:
         - DeviceIndex: "0"
           SubnetId: !ImportValue
@@ -450,3 +569,6 @@ Outputs:
     Description: For SSM port forwarding to Grafana and Prometheus (make grafana)
     Condition: WithMonitoring
     Value: !Ref MonitorInstance
+  ShardSetGroups:
+    Description: The extra replica set's Auto Scaling groups (kvscale sets their capacity)
+    Value: !Join [",", [!Ref ShardSet3A, !Ref ShardSet3B, !Ref ShardSet3C]]

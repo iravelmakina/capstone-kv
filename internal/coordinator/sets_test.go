@@ -3,6 +3,7 @@ package coordinator
 import (
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -105,5 +106,29 @@ func TestSetStatesSurviveRestart(t *testing.T) {
 		if id, found := m.ring.Lookup([]byte(fmt.Sprintf("k%d", i))); found && id == "shard-3" {
 			t.Fatal("a pending set is on the ring after a restart")
 		}
+	}
+}
+
+// The replicas' service discovery for Prometheus (ADR-0035): every replica of a set that
+// isn't retired, at its API port + 1100.
+func TestServiceDiscovery(t *testing.T) {
+	c := newCluster(t, 2, true)
+	rec := httptest.NewRecorder()
+	c.obj.SDHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/sd", nil))
+	var groups []struct {
+		Targets []string `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &groups); err != nil || len(groups) != 1 || len(groups[0].Targets) != 6 {
+		t.Fatalf("/sd = %s", rec.Body.String())
+	}
+	for _, target := range groups[0].Targets {
+		host, port, _ := strings.Cut(target, ":")
+		addr := c.nodes["1a"].srv.URL
+		if host != "127.0.0.1" || port == "" || strings.HasSuffix(addr, ":"+port) {
+			t.Fatalf("target %s: want the API port + 1100 on the replica's host", target)
+		}
+	}
+	if got := metricsTarget("http://10.20.64.11:8083"); got != "10.20.64.11:9183" {
+		t.Fatalf("metricsTarget = %q, want 10.20.64.11:9183", got)
 	}
 }

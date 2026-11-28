@@ -5,6 +5,11 @@
 #
 #   node-boot.sh <bucket> <version> coordinator <expected-shards> <w>
 #   node-boot.sh <bucket> <version> node <coordinator-private-ip> <w> <shard>=<replica>:<port>...
+#   node-boot.sh <bucket> <version> node-from-tags <coordinator-private-ip> <w>
+#
+# node-from-tags (M5, ADR-0035): an instance of an extra replica set's Auto Scaling group
+# reads its shard, replica ID and port from its instance tags (kv-shard, kv-replica,
+# kv-port, set by the group) and runs that one replica, like "node".
 #
 # KV_MONITOR_IP (environment, M4): the monitor's private IP; when set, Grafana Alloy ships
 # the containers' logs to its Loki (ADR-0029). Each container's /metrics is published on its
@@ -24,6 +29,12 @@ TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-me
 md() { curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
 MY_IP=$(md local-ipv4)
 REGION=$(md placement/region)
+
+if [ "$ROLE" = node-from-tags ]; then
+  SPEC="$(md tags/instance/kv-shard)=$(md tags/instance/kv-replica):$(md tags/instance/kv-port)"
+  set -- "$1" "$2" node "$4" "$5" "$SPEC"
+  ROLE=node
+fi
 
 # 1. Docker, from the Amazon Linux package repositories (hosted in S3).
 command -v docker >/dev/null || dnf install -y docker

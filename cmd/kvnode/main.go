@@ -104,7 +104,7 @@ func main() {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
-	var handler, metricsHandler http.Handler
+	var handler, metricsHandler, sdHandler http.Handler
 	var closeStore func() error
 	switch *role {
 	case "coordinator":
@@ -139,7 +139,7 @@ func main() {
 		} else {
 			log.Print("no API keys file: the public API is open (local use only)")
 		}
-		handler, metricsHandler = coord.Handler(), coord.MetricsHandler()
+		handler, metricsHandler, sdHandler = coord.Handler(), coord.MetricsHandler(), coord.SDHandler()
 		log.Printf("coordinator: %d shards × %d replicas, W=%d R=%d, %d virtual nodes", *expected, *replicas, *w, r, *vnodes)
 
 	case "shard":
@@ -166,6 +166,9 @@ func main() {
 	api.Set(handler) // logs replayed: serve the real API from now on
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("GET /metrics", metricsHandler)
+	if sdHandler != nil {
+		metricsMux.Handle("GET /sd", sdHandler) // Prometheus finds the replicas here (ADR-0035)
+	}
 	metricsSrv := &http.Server{Addr: *metricsListen, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

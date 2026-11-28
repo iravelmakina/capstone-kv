@@ -1,8 +1,10 @@
 # Prometheus for capstone-kv (ADR-0029). The same file runs locally (docker compose) and on
 # the monitor instance in AWS; only the target files differ:
-#   targets/coordinator.json, targets/replicas.json, targets/probe.json
+#   targets/coordinator.json, targets/probe.json
 # locally from monitoring/targets-local/, in AWS written by scripts/monitor-boot.sh from
-# the app stack's private IPs.
+# the app stack's private IPs. Replicas come from the coordinator's service discovery
+# (M5, ADR-0035): "coordinator" is the Compose service locally and, in AWS, a host entry the
+# monitor's Prometheus container gets (--add-host).
 global:
   scrape_interval: 5s        # a stopped node shows within one scrape (design: detection time)
   evaluation_interval: 5s    # rules are evaluated as often as data arrives
@@ -22,11 +24,13 @@ scrape_configs:
     file_sd_configs:
       - files: [/etc/prometheus/targets/coordinator.json]
 
-  # Every replica's metrics port (9181 for shard-1, 9182 for shard-2 in AWS; 9180 inside
-  # each container locally). Shard and replica come as labels on the series themselves.
+  # Every replica's metrics port (9181-9183 for shards 1-3 in AWS; 9180 inside each
+  # container locally), listed by the coordinator at /sd: a replica set that joins is
+  # scraped from its registration on. Shard and replica come as labels on the series.
   - job_name: replica
-    file_sd_configs:
-      - files: [/etc/prometheus/targets/replicas.json]
+    http_sd_configs:
+      - url: http://coordinator:9180/sd
+        refresh_interval: 15s
 
   # The outside view of availability (ADR-0025): an authenticated read through the
   # coordinator every 5 s, made by the blackbox exporter with the read-only probe key.

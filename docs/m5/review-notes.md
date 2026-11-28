@@ -40,3 +40,39 @@ Explained in chat before the instruction above; committed after it. See
   5-minute window stayed under 1% above the edge; the test now uses a heavier breach.
 - Dashboard: four panels (active capacity; migration progress; write holds; leaders per
   node). Runbook entries for `ScaleOutDue` and `CoordinatorBound`.
+
+## Task 6.3: infrastructure for the extra replica set
+
+- `infra/app.yaml`:
+  - `CoordinatorInstanceType` (default t3.medium, ADR-0035);
+  - launch template `ShardSetTemplate`: same AMI and type, the `Inventory-App-Role`
+    instance profile, the shard security group, IMDSv2 with **instance-metadata tags**
+    turned on, user data running `node-boot.sh … node-from-tags`;
+  - three groups `ShardSet3A/B/C` (`<stack>-shard-3a/b/c`), one private subnet each, min 0,
+    max 1, **no `DesiredCapacity`** (a stack update never changes capacity), new instances
+    protected from scale-in, tags `kv-shard=shard-3`, `kv-replica=3a|3b|3c`, `kv-port=8083`;
+  - security-group ranges widened to 8081–8083 and 9181–9183; output `ShardSetGroups`;
+  - the monitor's root volume is 30 GB gp3.
+- **Deviations from the design, said here for review:** (1) the monitor gets a 30 GB *root*
+  volume instead of a separate data volume: same capacity, no formatting or mounting in
+  the boot script; (2) CloudFormation has no property for an Auto Scaling group's
+  suspended processes, so `kvscale` will suspend `ReplaceUnhealthy` and `AZRebalance` on
+  each group before it acts (with one subnet per group, AZ rebalancing has nothing to move
+  anyway); (3) shard-3 uses port 8083, following "shard N on 808N".
+- `scripts/node-boot.sh`: role `node-from-tags` reads `kv-shard`, `kv-replica`, `kv-port` from
+  instance-metadata tags and runs that one replica like `node`.
+- `internal/coordinator/observe.go`: `SDHandler` (`GET /sd` on the metrics port) lists every
+  replica of a set that isn't retired at its API port + 1100; `cmd/kvnode` serves it.
+  `monitoring/prometheus.yml`: the replica job uses `http_sd_configs` at
+  `http://coordinator:9180/sd`; locally that's the Compose service, and in AWS
+  `monitor-boot.sh` gives the Prometheus container `--add-host coordinator:<IP>`. The static
+  `monitoring/targets-local/replicas.json` is deleted. Checked locally: Prometheus found the
+  six replicas through `/sd`, all up. Test `TestServiceDiscovery`.
+- `scripts/monitor-boot.sh`: a bug the change would have caused, fixed: its wait for "3
+  nodes" matched `velmakina-kv-node-*`, which would now include shard-3's instances.
+- `monitoring/loki.yml`: retention 12 h (was 24 h).
+- `Makefile` `up-app`: refuses while any shard-3 group has an instance (read-only
+  `describe-auto-scaling-groups`), unless `SCALED_OK=yes`.
+- Checked: `make lint` (cfn-lint and the security-group description check) passes. **Not
+  deployed.** Unverified until the first lab session: that the lab lets `voclabs` create
+  the groups (the Auto Scaling service-linked role must exist), and the instance limit.
