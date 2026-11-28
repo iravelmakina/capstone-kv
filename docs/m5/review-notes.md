@@ -197,3 +197,23 @@ no code.
   `cmd/kvops`), `cmd/kvmcp` tests, `make monitoring-check`, `make lint`, `openspec validate
   m5-production --strict`: all pass.
 
+## The load profiles for the lab (prepares task 8.4)
+
+Committed on the instruction to continue without stops; review later.
+
+- `scripts/m5-bench.sh`: runs on the benchmark client like `bench.sh`. YCSB workload A
+  throttled with go-ycsb's `target` (ops/s over all threads, 96 threads by default):
+  `calibrate` (steps of LOW up to HIGH, 3 min each), `gradual` (5-min steps LOW → HIGH, then
+  LOW), `spike` (LOW 5 min, HIGH 15, LOW 10), `sustained` (HIGH 30 min), as the
+  load-testing spec defines them. go-ycsb 1.0.3 defines `maxexecutiontime` but never reads
+  it, so a step's length is `target × seconds` operations, with `timeout` at 1.5× in case the
+  store falls behind (the output says so). Each step prints its UTC start (to line up with
+  the dashboard and kvscale's log) and the summary lines only (SSM keeps 24,000 characters).
+  `KVBENCH_DIR` replaces `/opt/kvbench` for a local trial.
+- Makefile: `bench-aws` takes `BENCH_SCRIPT` / `BENCH_ARGS` (defaults give exactly the old
+  command); `make bench-profile PROFILE= LOW= HIGH= [THREADS=]` calls it with the new
+  script and the profile as label.
+- Checked locally with stand-ins for `aws` and `timeout` (scratchpad only): `calibrate`
+  100 → 200 ops/s with 16 threads ran 99.9 and 199.9 ops/s for 180.1 s each, 0 failures,
+  p99 9.5 / 6.0 ms. `make -n` shows the SSM command for both scripts.
+

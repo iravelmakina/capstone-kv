@@ -23,7 +23,7 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave autoscale autoscale-local alertmanager ops-key ops-image ops-agent ops-approve ops-eval rebuild-replica smoke \
+.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave autoscale autoscale-local alertmanager ops-key ops-image ops-agent ops-approve ops-eval bench-profile rebuild-replica smoke \
         up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys monitoring-images monitoring-check grafana prometheus
 
 help:            ## list targets
@@ -408,6 +408,10 @@ RUNS ?= 3
 WORKLOADS ?= a b # M3 variants: WORKLOADS=a LABEL=w1 (or LABEL=follower-down)
 LABEL ?=
 
+# The script bench-aws runs on the client and its arguments after <bucket> <version> <url>;
+# bench-profile swaps in the M5 load profiles.
+BENCH_SCRIPT ?= bench.sh
+BENCH_ARGS ?= $(RUNS) '$(strip $(WORKLOADS))'
 bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=true)
 	@set -euo pipefail; \
 	out() { $(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='$$1'].OutputValue" --output text; }; \
@@ -416,14 +420,14 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	(cd bench && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../.kvbench-linux .); \
 	$(AWS) s3 cp .kvbench-linux s3://$(BUCKET)/bench/$(VERSION)/kvbench --quiet; \
 	$(AWS) s3 cp --recursive bench/workloads s3://$(BUCKET)/bench/$(VERSION)/workloads --quiet; \
-	$(AWS) s3 cp scripts/bench.sh s3://$(BUCKET)/bench/$(VERSION)/bench.sh --quiet; \
+	$(AWS) s3 cp scripts/$(BENCH_SCRIPT) s3://$(BUCKET)/bench/$(VERSION)/$(BENCH_SCRIPT) --quiet; \
 	echo "client $$client -> $$url, $(RUNS) runs per workload: waiting for the SSM agent"; \
 	for i in $$(seq 30); do \
 	  [ "$$($(AWS) ssm describe-instance-information --filters Key=InstanceIds,Values=$$client --query 'InstanceInformationList[0].PingStatus' --output text)" = Online ] && break; \
 	  sleep 10; done; \
 	cmd=$$($(AWS) ssm send-command --instance-ids $$client --document-name AWS-RunShellScript \
 	  --comment "capstone-kv benchmark $(VERSION)" --timeout-seconds 600 \
-	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/bench.sh /tmp/bench.sh --region $(REGION)\",\"bash /tmp/bench.sh $(BUCKET) $(VERSION) $$url $(RUNS) '$(strip $(WORKLOADS))'\"]" \
+	  --parameters "executionTimeout=[\"7200\"],commands=[\"aws s3 cp s3://$(BUCKET)/bench/$(VERSION)/$(BENCH_SCRIPT) /tmp/$(BENCH_SCRIPT) --region $(REGION)\",\"bash /tmp/$(BENCH_SCRIPT) $(BUCKET) $(VERSION) $$url $(BENCH_ARGS)\"]" \
 	  --query Command.CommandId --output text); \
 	echo "SSM command $$cmd started $$(date -u +%T) UTC; polling every 30 s"; \
 	errs=0; \
@@ -440,6 +444,14 @@ bench-aws:       ## YCSB A and B on the client in AWS (app stack up with BENCH=t
 	$(AWS) s3 cp $$result s3://$(BUCKET)/$$result --quiet; \
 	echo "saved to $$result and s3://$(BUCKET)/$$result"; \
 	[ "$$status" = Success ]
+
+# M5 load profiles (spec load-testing): YCSB A throttled to a target rate, 96 threads.
+# PROFILE=calibrate|gradual|spike|sustained, LOW = the M4 rate, HIGH >= 2x the rate at which
+# calibration crossed a threshold (ops/s). Run make autoscale in another terminal (except for
+# calibrate: AUTOSCALE=no). Results like bench-aws's, labelled with the profile.
+bench-profile:   ## M5: a load profile on the AWS client (PROFILE= LOW= HIGH= [THREADS=96])
+	@test -n "$(PROFILE)" -a -n "$(LOW)" -a -n "$(HIGH)" || { echo "PROFILE=calibrate|gradual|spike|sustained LOW=<ops/s> HIGH=<ops/s>"; exit 1; }
+	$(MAKE) bench-aws BENCH_SCRIPT=m5-bench.sh BENCH_ARGS="$(PROFILE) $(LOW) $(HIGH) $(or $(THREADS),96)" LABEL=$(PROFILE)
 
 app-url:         ## print the coordinator URL of the running app stack
 	@$(CFN) describe-stacks --stack-name $(APP_STACK) \
