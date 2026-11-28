@@ -9,7 +9,7 @@
 - [x] 1.2 Author confirms the agent runtime (API key or the Claude Code fallback), reviews proposal, design, specs and ADRs 0032–0036, and sets them to `Accepted` in chat; ADR-0013, ADR-0022 and ADR-0031 get "Superseded in part by" lines (texts unchanged)
 - [ ] 1.3 Read-only check of the lab's instance limit (lab page, read by the author) recorded in `docs/m5/aws-limits.md`; if below 9, stop and write a new ADR for the scaling unit
 - [x] 1.4 `openspec validate m5-production --strict` passes
-- [ ] 1.5 Spec-only commit (no code, no templates); push `m5-production`
+- [x] 1.5 Spec-only commit (no code, no templates); push `m5-production`
 
 ## 2. Health and version endpoints
 
