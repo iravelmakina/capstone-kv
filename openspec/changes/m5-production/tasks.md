@@ -43,10 +43,10 @@
 
 ## 7. Ops agent
 
-- [ ] 7.1 `cmd/kvops` tools: firing alerts, the fixed named queries, cluster state (`status` key), executor decisions, release; inputs passed as structured data; runs in a container without `~/.aws` or the admin key — test: the tool list has no item, log or free-form query tool; the container has no AWS credentials and can't write approvals
-- [ ] 7.2 Proposal schema (kinds, parameters, reasoning, evidence, risks), checks (kind, bounds, names exist, abort only before cutover, scaling only when the autoscaler is off or blocked), records of each run, delivery through Alertmanager — deterministic unit tests that don't call the model
-- [ ] 7.3 Evaluation set: recorded situations with the expected kind (latency with the autoscaler on → `no_action`; autoscaler off → `scale_up`; node down → `no_action`; colocated leaders → `transfer_leader`; stalled migration → `abort_migration`; an injected annotation stays within bounds); `make ops-eval` reports the pass rate (run on request, billed)
-- [ ] 7.4 Approval gate `kvops approve <id>` (outside the container; shows the proposal, asks, records approver, 10-minute expiry) executed by kvscale with guards re-checked — tests: expired and state-changed proposals refused
+- [x] 7.1 `cmd/kvops` tools: firing alerts, the fixed named queries, cluster state (`status` key), executor decisions, release; inputs passed as structured data; runs in a container without `~/.aws` or the admin key — test: the tool list has no item, log or free-form query tool; the container has no AWS credentials and can't write approvals
+- [x] 7.2 Proposal schema (kinds, parameters, reasoning, evidence, risks), checks (kind, bounds, names exist, abort only before cutover, scaling only when the autoscaler is off or blocked), records of each run, delivery through Alertmanager — deterministic unit tests that don't call the model
+- [x] 7.3 Evaluation set: recorded situations with the expected kind (latency with the autoscaler on → `no_action`; autoscaler off → `scale_up`; node down → `no_action`; colocated leaders → `transfer_leader`; stalled migration → `abort_migration`; an injected annotation stays within bounds); `make ops-eval` reports the pass rate (run on request, billed)
+- [x] 7.4 Approval gate `kvops approve <id>` (outside the container; shows the proposal, asks, records approver, 10-minute expiry) executed by kvscale with guards re-checked — tests: expired and state-changed proposals refused
 - [ ] 7.5 Demo transcript for the defense in `docs/m5/ops-agent.md`: proposals from a local run, one approved and executed, one refused by a guard, and the evaluation pass rate
 
 ## 8. Lab sessions (the author deploys and deletes)

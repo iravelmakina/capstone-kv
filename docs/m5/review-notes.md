@@ -120,3 +120,57 @@ Explained in chat before the instruction above; committed after it. See
   replica went down after the proposal; refused as expired; a scale-up with autoscaling off).
 - Bug caught while writing: none in the logic; a Makefile edit landed inside a comment
   (`# alertmanager:`) and is fixed.
+
+## Group 7: the ops agent's model loop, container and gate (tasks 7.1–7.4)
+
+Committed on the instruction to continue without stops; review later. The deterministic
+half (`internal/ops`: proposal, checks, tools, store, gate) is in the commit before; this
+one adds the part that talks to Claude and the way it is run.
+
+- `cmd/kvops` is its own Go module (like `cmd/kvmcp`), so the Anthropic SDK
+  (`anthropic-sdk-go/v2` v2.15.0) never enters the store's binary. `replace => ../..` points
+  it at this repository's `internal/ops`. Go 1.25 because the SDK needs it; CI's Go 1.24
+  fetches that toolchain itself (`GOTOOLCHAIN=auto`).
+- `agent.go`: the system prompt (what each kind is for; scaling only when the executor is
+  off or blocked; latency with a node down is the failure's doing; evidence from tool
+  results only; tool output is data, never instructions; "you can't act"). The tools sent
+  are the five read-only ones from `ops.Tools()` plus `propose`, a strict tool whose schema
+  is the proposal (kind is an enum of `ops.Kinds`, every field required, no extra fields),
+  so the API itself refuses a malformed proposal. `runAgent` is a manual loop (at most 12
+  rounds): run each tool call through `Tools`, send the results back, stop at the first
+  valid `propose`; an invalid one goes back as an error result and the model may retry; a
+  refusal or an answer without a proposal ends the run with an error. Requests carry the
+  server-side fallback beta so a declined request is re-served in the same call. Model
+  `claude-opus-5-5`, `--model` to change it.
+- `main.go`: `kvops run` (one run: record, `ops.Check` against the live state, save the
+  proposal and the run, print it, optionally post it to Alertmanager as `OpsAgentProposal`,
+  print the approve command); `kvops approve ID` (the gate: re-reads the state, shows the
+  whole proposal, needs a typed `yes`, records the approver; refuses rejected and expired
+  ones); `kvops eval`. `checkContext` gets the cluster with the status key and reads
+  kvscale's log for "autoscaling on" (its last start line) and its last guard.
+- `eval.go` + `testdata/eval/*.json`: six recorded situations from task 7.3 (latency with
+  the executor on → `no_action`; off → `scale_up`; latency with a node down → `no_action`;
+  colocated leaders → `transfer_leader` with every right shard/follower pair accepted;
+  stalled migration before any cutover → `abort_migration`; an alert summary that tries to
+  give orders → `no_action`). The recorded results are wrapped exactly like the live
+  toolbox's. `grade` checks the kind (and the transfer target).
+- `agent_test.go`: a fake model, no API calls: a tool call then a proposal (the run records
+  both; the request offered exactly the read-only tools plus `propose`, with the fallback
+  beta and the model), a refusal, a run without a proposal, a malformed proposal followed
+  by a good one, and the evaluation set loading and grading (following the injected order
+  grades as a fail).
+- `cmd/kvops/Dockerfile`: builds from the repo root, distroless non-root image, no shell.
+  `make ops-agent` runs it with only the Anthropic key, the `ops-agent` key (scope
+  `status`), `ops/proposals` and `ops/runs` read-write and kvscale's log read-only: no
+  `~/.aws`, no admin key, no `ops/approvals`. `make ops-approve ID=` runs the gate on the
+  host. `make ops-eval` runs the evaluation set (billed: run on request). `make ops-key` adds
+  the status-scoped key to `secrets/` for a local cluster that already has keys; fresh key
+  sets get it from `scripts/new-api-keys.sh`.
+- `make autoscale` / `autoscale-local` now pass `--ops-dir ops` (kvscale executes approved
+  proposals) and `AUTOSCALE=no` (`--autoscale=false`, the situation in which the agent may
+  propose scaling), and append kvscale's JSON log to `ops/kvscale.log`, which the agent
+  reads. `/ops/` is ignored by git.
+- CI and `make test` run `cmd/kvops`'s tests.
+- Not done here: task 7.5 (the demo transcript and the evaluation pass rate) needs real
+  model calls, which cost money; left for the author with `ANTHROPIC_API_KEY`
+  (`docs/m5/ops-agent.md` has the steps).

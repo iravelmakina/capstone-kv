@@ -1,0 +1,182 @@
+{
+  "name": "01-latency-autoscaler-on",
+  "expect": "no_action",
+  "tools": {
+    "get_alerts": [
+      {
+        "labels": {
+          "alertname": "ScaleOutDue",
+          "severity": "info",
+          "shard": "shard-1",
+          "trigger": "write"
+        },
+        "summary": "Scale-out due: shard-1 write p99 above 50 ms",
+        "since": "2026-11-28T12:00:00Z"
+      }
+    ],
+    "get_cluster": {
+      "sets": [
+        {
+          "id": "shard-1",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "1a",
+          "replicas": [
+            {
+              "id": "1a",
+              "address": "http://10.0.0.1:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1b",
+              "address": "http://10.0.0.2:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1c",
+              "address": "http://10.0.0.3:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        },
+        {
+          "id": "shard-2",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "2b",
+          "replicas": [
+            {
+              "id": "2a",
+              "address": "http://10.0.0.1:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2b",
+              "address": "http://10.0.0.2:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2c",
+              "address": "http://10.0.0.3:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        }
+      ],
+      "ring": [
+        "shard-1",
+        "shard-2"
+      ],
+      "migration": null
+    },
+    "get_executor_decisions": [
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "started",
+        "autoscale": true,
+        "capacity": "aws"
+      },
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "decision",
+        "action": "launch",
+        "reason": "scale-out due for [shard-1/write] at 2840 req/s",
+        "blocked": ""
+      }
+    ]
+  },
+  "queries": {
+    "write_p99_by_shard": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "0.061"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "0.058"
+      }
+    ],
+    "leader_write_p99": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "0.048"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "0.046"
+      }
+    ],
+    "request_rate_by_shard": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "1450"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "1390"
+      }
+    ],
+    "ring_shards": [
+      {
+        "labels": {},
+        "value": "2"
+      }
+    ],
+    "error_ratio_5m": [
+      {
+        "labels": {},
+        "value": "0"
+      }
+    ]
+  }
+}

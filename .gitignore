@@ -28,3 +28,7 @@ bench-results/
 
 # the MCP server binary built for the local demo
 /kvmcp
+
+# the ops agent's proposals, run records, approvals and the executor's log (M5)
+/ops/
+/cmd/kvops/kvops

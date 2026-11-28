@@ -1,0 +1,213 @@
+{
+  "name": "03-latency-with-a-node-down",
+  "expect": "no_action",
+  "tools": {
+    "get_alerts": [
+      {
+        "labels": {
+          "alertname": "NodeDown",
+          "severity": "info",
+          "node": "10.0.0.3"
+        },
+        "summary": "Node 10.0.0.3 is down",
+        "since": "2026-11-28T12:00:00Z"
+      },
+      {
+        "labels": {
+          "alertname": "ReplicaDown",
+          "severity": "info",
+          "shard": "shard-1",
+          "replica": "1c"
+        },
+        "summary": "Replica 1c of shard-1 is down",
+        "since": "2026-11-28T12:00:00Z"
+      },
+      {
+        "labels": {
+          "alertname": "ReplicaDown",
+          "severity": "info",
+          "shard": "shard-2",
+          "replica": "2c"
+        },
+        "summary": "Replica 2c of shard-2 is down",
+        "since": "2026-11-28T12:00:00Z"
+      }
+    ],
+    "get_cluster": {
+      "sets": [
+        {
+          "id": "shard-1",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "1a",
+          "replicas": [
+            {
+              "id": "1a",
+              "address": "http://10.0.0.1:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1b",
+              "address": "http://10.0.0.2:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1c",
+              "address": "http://10.0.0.3:8081",
+              "available": false,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        },
+        {
+          "id": "shard-2",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "2b",
+          "replicas": [
+            {
+              "id": "2a",
+              "address": "http://10.0.0.1:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2b",
+              "address": "http://10.0.0.2:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2c",
+              "address": "http://10.0.0.3:8082",
+              "available": false,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        }
+      ],
+      "ring": [
+        "shard-1",
+        "shard-2"
+      ],
+      "migration": null
+    },
+    "get_executor_decisions": [
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "started",
+        "autoscale": false,
+        "capacity": "aws"
+      },
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "decision",
+        "action": "none",
+        "reason": "scale-out due ([shard-1/read])",
+        "blocked": "replica 1c of shard-1 is down"
+      }
+    ]
+  },
+  "queries": {
+    "read_p99_by_shard": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "0.0135"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "0.0128"
+      }
+    ],
+    "replicas_up": [
+      {
+        "labels": {
+          "replica": "1a"
+        },
+        "value": "1"
+      },
+      {
+        "labels": {
+          "replica": "1b"
+        },
+        "value": "1"
+      },
+      {
+        "labels": {
+          "replica": "1c"
+        },
+        "value": "0"
+      },
+      {
+        "labels": {
+          "replica": "2a"
+        },
+        "value": "1"
+      },
+      {
+        "labels": {
+          "replica": "2b"
+        },
+        "value": "1"
+      },
+      {
+        "labels": {
+          "replica": "2c"
+        },
+        "value": "0"
+      }
+    ],
+    "request_rate_by_shard": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "900"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "880"
+      }
+    ]
+  }
+}

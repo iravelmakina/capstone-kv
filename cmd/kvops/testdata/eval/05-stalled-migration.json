@@ -1,0 +1,203 @@
+{
+  "name": "05-stalled-migration",
+  "expect": "abort_migration",
+  "tools": {
+    "get_alerts": [
+      {
+        "labels": {
+          "alertname": "MigrationStalled",
+          "severity": "info"
+        },
+        "summary": "The running migration has made no progress for 5 minutes",
+        "since": "2026-11-28T12:00:00Z"
+      }
+    ],
+    "get_cluster": {
+      "sets": [
+        {
+          "id": "shard-1",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "1a",
+          "replicas": [
+            {
+              "id": "1a",
+              "address": "http://10.0.0.1:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1b",
+              "address": "http://10.0.0.2:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "1c",
+              "address": "http://10.0.0.3:8081",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        },
+        {
+          "id": "shard-2",
+          "state": "active",
+          "base": true,
+          "serving": true,
+          "epoch": 1,
+          "leader": "2b",
+          "replicas": [
+            {
+              "id": "2a",
+              "address": "http://10.0.0.1:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2b",
+              "address": "http://10.0.0.2:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            },
+            {
+              "id": "2c",
+              "address": "http://10.0.0.3:8082",
+              "available": true,
+              "silentFor": "1s",
+              "last": {
+                "epoch": 1,
+                "lsn": 5000
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        },
+        {
+          "id": "shard-3",
+          "state": "pending",
+          "base": false,
+          "serving": false,
+          "epoch": 1,
+          "leader": "3a",
+          "replicas": [
+            {
+              "id": "3a",
+              "address": "http://10.0.0.7:8083",
+              "available": false,
+              "silentFor": "6m0s",
+              "last": {
+                "epoch": 1,
+                "lsn": 120
+              }
+            }
+          ],
+          "unavailable503": 0,
+          "notCommitted504": 0
+        }
+      ],
+      "ring": [
+        "shard-1",
+        "shard-2"
+      ],
+      "migration": {
+        "id": "add-shard-3-1795881625",
+        "kind": "add",
+        "shard": "shard-3",
+        "before": [
+          "shard-1",
+          "shard-2"
+        ],
+        "after": [
+          "shard-1",
+          "shard-2",
+          "shard-3"
+        ],
+        "vnodes": 128,
+        "phase": "copying",
+        "sources": {
+          "shard-1": {
+            "commitPoint": 52000,
+            "copied": 6100,
+            "left": 0,
+            "tailLSN": 0,
+            "snapshotDone": false,
+            "cutOver": false
+          },
+          "shard-2": {
+            "commitPoint": 0,
+            "copied": 0,
+            "left": 0,
+            "tailLSN": 0,
+            "snapshotDone": false,
+            "cutOver": false
+          }
+        },
+        "started": "2026-11-28T11:50:00Z",
+        "requestedBy": "kvscale"
+      }
+    },
+    "get_executor_decisions": [
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "started",
+        "autoscale": true,
+        "capacity": "aws"
+      },
+      {
+        "time": "2026-11-28T12:00:00Z",
+        "msg": "decision",
+        "action": "none",
+        "reason": "migration add-shard-3-1795881625 is copying",
+        "blocked": ""
+      }
+    ]
+  },
+  "queries": {
+    "migration_running": [
+      {
+        "labels": {},
+        "value": "1"
+      }
+    ],
+    "migration_copied": [
+      {
+        "labels": {
+          "shard": "shard-1"
+        },
+        "value": "6100"
+      },
+      {
+        "labels": {
+          "shard": "shard-2"
+        },
+        "value": "0"
+      }
+    ]
+  }
+}

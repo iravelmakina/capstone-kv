@@ -68,6 +68,9 @@ jobs:
       - name: MCP server tests (cmd/kvmcp is its own Go module, ADR-0027)
         working-directory: cmd/kvmcp
         run: go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...
+      - name: ops agent tests (cmd/kvops is its own Go module, ADR-0034; no model calls)
+        working-directory: cmd/kvops
+        run: go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

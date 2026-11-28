@@ -23,7 +23,7 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave autoscale autoscale-local alertmanager rebuild-replica smoke \
+.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave autoscale autoscale-local alertmanager ops-key ops-image ops-agent ops-approve ops-eval rebuild-replica smoke \
         up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys monitoring-images monitoring-check grafana prometheus
 
 help:            ## list targets
@@ -115,8 +115,8 @@ rebuild:         ## timed teardown + rebuild (for docs/m1/recreate-log.md)
 
 # --- The Go app, locally (M2, M3) ----------------------------------------------------------
 
-test:            ## go vet + all Go tests (incl. contract test and ring distribution)
-	go vet ./... && go test ./...
+test:            ## go vet + all Go tests (incl. contract test, ring distribution, the ops agent's loop)
+	go vet ./... && go test ./... && cd cmd/kvops && go vet ./... && go test ./...
 
 keys:            ## make local API keys in secrets/ (git-ignored), unless they exist (ADR-0027)
 	@scripts/new-api-keys.sh secrets
@@ -344,10 +344,50 @@ autoscale:       ## M5: run the scaling executor against the AWS stack (author's
 	groups=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='ShardSetGroups'].OutputValue" --output text); \
 	export KV_API_KEY=$$($(AWS) secretsmanager get-secret-value --secret-id velmakina-kv/ops-key --query SecretString --output text); \
 	export AWS_PROFILE=$(PROFILE) AWS_REGION=$(REGION); \
-	go run ./cmd/kvscale --coordinator $$url --capacity aws --groups $$groups $(if $(filter yes,$(DRY_RUN)),--dry-run,)
+	mkdir -p ops; go run ./cmd/kvscale --coordinator $$url --capacity aws --groups $$groups --ops-dir ops \
+	  $(if $(filter no,$(AUTOSCALE)),--autoscale=false,) $(if $(filter yes,$(DRY_RUN)),--dry-run,) | tee -a ops/kvscale.log
 
 autoscale-local: ## M5: run the scaling executor against the local cluster (Compose shard-3)
-	KV_API_KEY=$$(cat secrets/ops.key) go run ./cmd/kvscale --coordinator http://localhost:8080 --capacity compose $(if $(filter yes,$(DRY_RUN)),--dry-run,)
+	mkdir -p ops; KV_API_KEY=$$(cat secrets/ops.key) go run ./cmd/kvscale --coordinator http://localhost:8080 --capacity compose --ops-dir ops \
+	  $(if $(filter no,$(AUTOSCALE)),--autoscale=false,) $(if $(filter yes,$(DRY_RUN)),--dry-run,) | tee -a ops/kvscale.log
+
+# The ops agent (M5, ADR-0034). ops-key adds a key with only the status scope to
+# secrets/api-keys.json (in AWS then: make secrets && make rotate-keys). ops-agent runs one
+# agent run in its container, which gets no AWS credentials, no admin key and no approvals
+# directory; ops-approve is the gate, on the host; ops-eval runs the evaluation set (calls
+# the model: billed). COORD defaults to the local cluster; in AWS give the coordinator URL
+# (make app-url) and run make prometheus / make alertmanager in other terminals.
+COORD ?= http://localhost:8080
+ops-key:         ## M5: add the ops agent's status-scoped key to secrets/ (if missing)
+	@test -s secrets/ops-agent.key && echo "secrets/ops-agent.key exists" || { \
+	  umask 077; v=$$(openssl rand -hex 32); printf '%s' "$$v" > secrets/ops-agent.key; \
+	  h=$$(printf '%s' "$$v" | openssl dgst -sha256 -r | cut -d' ' -f1); \
+	  jq --arg h "$$h" '. + [{"name":"ops-agent","sha256":$$h,"scopes":["status"]}]' secrets/api-keys.json > secrets/api-keys.json.new; \
+	  mv secrets/api-keys.json.new secrets/api-keys.json; chmod 644 secrets/api-keys.json; \
+	  echo "added key ops-agent (status scope); the local coordinator reloads it within 5 s"; }
+
+ops-image:
+	docker build -f cmd/kvops/Dockerfile -t kvops:local .
+
+ops-agent: ops-image ## M5: one ops-agent run in its container (needs ANTHROPIC_API_KEY)
+	@test -n "$$ANTHROPIC_API_KEY" || { echo "set ANTHROPIC_API_KEY"; exit 1; }
+	@mkdir -p ops/proposals ops/runs; touch ops/kvscale.log
+	docker run --rm --add-host=host.docker.internal:host-gateway \
+	  -e ANTHROPIC_API_KEY -e KV_STATUS_KEY=$$(cat secrets/ops-agent.key) \
+	  -v "$(CURDIR)/ops/proposals:/ops/proposals" -v "$(CURDIR)/ops/runs:/ops/runs" \
+	  -v "$(CURDIR)/ops/kvscale.log:/ops/kvscale.log:ro" \
+	  kvops:local run --store /ops --executor-log /ops/kvscale.log \
+	  --prometheus http://host.docker.internal:9090 --alertmanager http://host.docker.internal:9093 \
+	  --coordinator $(subst localhost,host.docker.internal,$(COORD))
+
+ops-approve:     ## M5: the approval gate for one proposal (ID=p-...), on the host
+	@test -n "$(ID)" || { echo "ID=<proposal id>"; exit 1; }
+	cd cmd/kvops && KV_STATUS_KEY=$$(cat ../../secrets/ops-agent.key) go run . approve --store ../../ops \
+	  --coordinator $(COORD) --executor-log ../../ops/kvscale.log $(ID)
+
+ops-eval: ops-image ## M5: the ops agent's evaluation set (calls the model: billed)
+	@test -n "$$ANTHROPIC_API_KEY" || { echo "set ANTHROPIC_API_KEY"; exit 1; }
+	docker run --rm -e ANTHROPIC_API_KEY kvops:local eval --eval-dir /testdata/eval
 
 # grafana-check: Grafana's data sources, each checked the way its plugin supports (the
 # Alertmanager one has no server-side health check), and the dashboard's panels. Locally
