@@ -27,7 +27,12 @@ route:
   group_wait: 5s
   group_interval: 30s
   repeat_interval: 1h
+  routes:
+    # An input for the autoscaler (ADR-0032), true most of the time: not a message.
+    - matchers: [alertname="ScaleInLatencyOk"]
+      receiver: silent
 receivers:
 $RECEIVERS
+  - name: silent
 EOF
 exec /bin/alertmanager --config.file="$CONFIG" --storage.path=/alertmanager "$@"

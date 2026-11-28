@@ -61,6 +61,23 @@ Writes to that shard get 503; reads too if fewer than 2 replicas are live.
 silent, the coordinator promotes the more up-to-date one. Never force a promotion by hand:
 that is how committed writes get lost.
 
+## ScaleOutDue (info, M5)
+
+**Means:** a shard's p99 at the coordinator has been above its scale-out edge (writes 50 ms
+for 3 minutes, reads 12 ms for 5 minutes) at >= 100 requests/s, and the shard's own latency
+confirms it (leader write p99 > 40 ms, or a replica's read p99 > 8 ms) (ADR-0032).
+**Check:** the executor's log (`make autoscale`): it either started a scale-out or names the
+guard that blocked it (a replica down, a migration or hold, the cooldown, the upper bound).
+**Do:** nothing while the executor runs. With it off, the ops agent proposes `scale_up`.
+
+## CoordinatorBound (info, M5)
+
+**Means:** writes are slow at the coordinator but not at the shard's leader: the time is
+spent in the coordinator (CPU, credits) or the network, so a new replica set wouldn't help.
+**Check:** the coordinator's CPU and CPU credits (EC2 metrics), `go_goroutines`.
+**Do:** reduce load or size the coordinator up (ADR-0035 put it on t3.medium); stop a
+calibration run here (ADR-0032).
+
 ## MigrationStalled (info, M5)
 
 **Means:** a migration (a replica set joining or leaving the ring, ADR-0033) has copied,

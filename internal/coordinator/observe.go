@@ -143,6 +143,17 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 		[]string{"source"}, sourceSamples(func(p *SourceProgress) float64 { return float64(p.Copied) }))
 	reg.GaugeFunc("kv_migration_records_left", "Running migration: committed records the source still has to send (tail).",
 		[]string{"source"}, sourceSamples(func(p *SourceProgress) float64 { return float64(max(p.Left, 0)) }))
+	reg.Gauge("kv_nodes", "Nodes (instances) the coordinator knows a live replica on: capacity in machines.", func() float64 {
+		nodes := map[string]bool{}
+		for _, s := range m.Status() {
+			for _, r := range s.Replicas {
+				if r.Available {
+					nodes[nodeOf(r.Address)] = true
+				}
+			}
+		}
+		return float64(len(nodes))
+	})
 	reg.GaugeFunc("kv_node_leaders", "Shard leaders running on each node (ADR-0036: at most one where possible).",
 		[]string{"node"}, func() []metrics.Sample {
 			perNode, _ := m.LeaderPlacement()

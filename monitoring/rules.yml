@@ -16,6 +16,24 @@ groups:
             sum by (shard, op, le) (rate(kv_request_duration_seconds_bucket{op=~"read|write"}[5m])))
       - record: kv:requests:rate5m
         expr: sum by (shard, op) (rate(kv_request_duration_seconds_count{op=~"read|write"}[5m]))
+      # Autoscaling inputs (ADR-0032): p99 over 2 minutes at the coordinator, the shard's own
+      # latency (writes: its leader's, commit wait included; reads: its slowest replica's),
+      # and the shard's request rate.
+      - record: kv:request_duration_seconds:p99_2m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (shard, op, le) (rate(kv_request_duration_seconds_bucket{op=~"read|write"}[2m])))
+      - record: kv:leader_write_seconds:p99_2m
+        expr: |
+          histogram_quantile(0.99, sum by (shard, le) (
+            rate(kv_replica_request_duration_seconds_bucket{op="write"}[2m])
+              and on (shard, replica) (kv_replica_role{role="leader"} == 1)))
+      - record: kv:replica_read_seconds:p99_2m_max
+        expr: |
+          max by (shard) (histogram_quantile(0.99,
+            sum by (shard, replica, le) (rate(kv_replica_request_duration_seconds_bucket{op="read"}[2m]))))
+      - record: kv:shard_requests:rate2m
+        expr: sum by (shard) (rate(kv_requests_total{shard!=""}[2m]))
       # The 5xx share over the windows the burn-rate alerts use.
       - record: kv:errors:ratio_rate1m
         expr: sum(rate(kv_requests_total{code=~"5.."}[1m])) / clamp_min(sum(rate(kv_requests_total[1m])), 1e-9)
@@ -63,6 +81,54 @@ groups:
       # Two leaders on one node while a follower could take one elsewhere (ADR-0036): losing
       # that node would stop two shards' writes. Nothing moves on its own; the ops agent
       # proposes a transfer and a person approves it.
+      # Autoscaling (ADR-0032). The executor (cmd/kvscale) acts on these, after its guards.
+      # Writes: the coordinator's p99 over the 50 ms edge, confirmed by the leader's own
+      # p99 over 40 ms (the time is spent in the shard), at >= 100 requests/s, for 3 minutes.
+      - alert: ScaleOutDue
+        expr: |
+          kv:request_duration_seconds:p99_2m{op="write"} > 0.05
+            and on (shard) kv:leader_write_seconds:p99_2m > 0.04
+            and on (shard) kv:shard_requests:rate2m >= 100
+        for: 3m
+        labels: { severity: info, trigger: write }
+        annotations:
+          summary: "Scale-out due: {{ $labels.shard }} write p99 above 50 ms"
+          description: "The coordinator's write p99 for {{ $labels.shard }} is {{ $value | humanizeDuration }} under load, and its leader is slow too (runbook: ScaleOutDue)."
+      # Reads: the coordinator's p99 over 12 ms, a replica's own p99 over 8 ms, for 5 minutes.
+      - alert: ScaleOutDue
+        expr: |
+          kv:request_duration_seconds:p99_2m{op="read"} > 0.012
+            and on (shard) kv:replica_read_seconds:p99_2m_max > 0.008
+            and on (shard) kv:shard_requests:rate2m >= 100
+        for: 5m
+        labels: { severity: info, trigger: read }
+        annotations:
+          summary: "Scale-out due: {{ $labels.shard }} read p99 above 12 ms"
+          description: "The coordinator's read p99 for {{ $labels.shard }} is {{ $value | humanizeDuration }} under load, and a replica is slow too (runbook: ScaleOutDue)."
+      # Slow at the coordinator but not in the shard: a new replica set wouldn't help.
+      - alert: CoordinatorBound
+        expr: |
+          kv:request_duration_seconds:p99_2m{op="write"} > 0.05
+            and on (shard) kv:leader_write_seconds:p99_2m <= 0.04
+            and on (shard) kv:shard_requests:rate2m >= 100
+        for: 3m
+        labels: { severity: info }
+        annotations:
+          summary: "{{ $labels.shard }} is slow at the coordinator, not in the shard"
+          description: "Write p99 above 50 ms at the coordinator while the leader answers within 40 ms: no scale-out (runbook: CoordinatorBound)."
+      # Every shard below the scale-out edges for 10 minutes (a shard with no traffic counts
+      # as below). The executor adds the rate guard and the cooldown. Not sent to Telegram.
+      - alert: ScaleInLatencyOk
+        expr: |
+          absent(
+            (kv:request_duration_seconds:p99_5m{op="write"} >= 0.05)
+              or (kv:request_duration_seconds:p99_5m{op="read"} >= 0.012))
+        for: 10m
+        labels: { severity: info }
+        annotations:
+          summary: Every shard below the scale-out thresholds for 10 minutes
+          description: "Scale-in may be due if the load also dropped (kvscale checks it)."
+
       # A migration that makes no progress for 5 minutes (ADR-0033): a target or source
       # unreachable, or a cutover that keeps missing its deadline with no writes flowing.
       - alert: MigrationStalled

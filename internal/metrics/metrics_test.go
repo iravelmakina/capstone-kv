@@ -62,6 +62,11 @@ func TestSLOBoundsAreBucketEdges(t *testing.T) {
 	if !has[0.015] || !has[0.06] {
 		t.Fatalf("buckets %v must include the SLO thresholds 0.015 and 0.06 (ADR-0026)", LatencyBuckets)
 	}
+	for _, edge := range []float64{0.008, 0.012, 0.04, 0.05} {
+		if !has[edge] {
+			t.Fatalf("buckets %v must include the scaling threshold %g (ADR-0032)", LatencyBuckets, edge)
+		}
+	}
 	for i := 1; i < len(LatencyBuckets); i++ {
 		if LatencyBuckets[i] <= LatencyBuckets[i-1] {
 			t.Fatalf("buckets must ascend: %v", LatencyBuckets)
