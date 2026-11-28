@@ -35,6 +35,10 @@ func TestContract(t *testing.T) {
 	steps := []step{
 		{"health", "GET", r + "/health", ""},
 		{"health", "GET", n + "/health", ""}, // 503 until the shards have registered
+		{"healthLive", "GET", n + "/health/live", ""},
+		{"healthReady", "GET", r + "/health/ready", ""},
+		{"healthReady", "GET", n + "/health/ready", ""}, // 503 with a reason
+		{"version", "GET", r + "/version", ""},
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`},
 		{"createTable", "POST", r + "/v1/tables", `{"name":"logs","partitionKey":"day"}`}, // 409
 		{"createTable", "POST", r + "/v1/tables", `{"name":""}`},                          // 400
@@ -91,8 +95,8 @@ func TestContract(t *testing.T) {
 			t.Errorf("%s %s -> %d, not documented for %s (documented: %v)", s.method, s.url, code, s.op, keys(codes))
 		}
 		// Error bodies follow the Error schema; HEAD has no body, and a 503 from /health
-		// is a Health body (documented that way).
-		if code >= 400 && s.method != "HEAD" && s.op != "health" {
+		// or /health/ready is a Health or Readiness body (documented that way).
+		if code >= 400 && s.method != "HEAD" && s.op != "health" && s.op != "healthReady" {
 			var e struct {
 				Error string `json:"error"`
 			}

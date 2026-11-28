@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/iravelmakina/capstone-kv/internal/auth"
+	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/metrics"
 )
@@ -92,6 +93,7 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 			return out
 		})
 	reg.AddRuntime()
+	reg.AddBuildInfo(buildinfo.Version, "coordinator")
 	return cm
 }
 

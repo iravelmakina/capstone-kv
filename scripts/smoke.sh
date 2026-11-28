@@ -3,7 +3,7 @@
 #   KV_API_KEY=<ops key> scripts/smoke.sh [base-url] [expected-version]   (default http://localhost:8080)
 # Used locally after `docker compose up` and by the CI smoke job on the coordinator, which
 # passes the release it deployed: then the coordinator and every registered shard must
-# report exactly that version in /health. (Shard addresses are private: the version check
+# report exactly that version in /version (M5). (Shard addresses are private: the version check
 # runs only where they are reachable, i.e. on the coordinator, not on a laptop.)
 # Exits non-zero at the first unexpected status.
 set -euo pipefail
@@ -44,7 +44,7 @@ for _ in $(seq 60); do
 done
 curl -s "$BASE/health" | grep -q '"ready":true' || { echo "FAIL coordinator not ready"; exit 1; }
 
-version_of() { curl -s "$1/health" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
+version_of() { curl -s "$1/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
 
 if [ -n "$EXPECT_VERSION" ]; then
   check "coordinator version" "$EXPECT_VERSION" "$(version_of "$BASE")"

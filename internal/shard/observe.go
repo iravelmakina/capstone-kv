@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/metrics"
 )
@@ -47,6 +48,7 @@ func (r *Replica) initMetrics() {
 		"Leader: seconds since each follower last held the leader's last record (0 when caught up).",
 		[]string{"follower"}, func() []metrics.Sample { return r.followerSamples(true) })
 	reg.AddRuntime()
+	reg.AddBuildInfo(buildinfo.Version, "shard")
 }
 
 // followerSamples reports, on a leader, each follower that has pulled in this epoch: its

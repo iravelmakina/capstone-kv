@@ -13,8 +13,8 @@
 
 ## 2. Health and version endpoints
 
-- [ ] 2.1 `/health/live`, `/health/ready`, `/version` on coordinator and replicas; `buildinfo.BuildTime` set by the linker in the Dockerfile; `kv_build_info{version,role}`; `/health` unchanged — verified by handler tests (live while not ready, replaying → 503 "replaying", version from the binary) and `make smoke` locally
-- [ ] 2.2 OpenAPI contracts updated and the contract test passes; `make smoke-aws` checks `/version` on every process (used from session 1)
+- [x] 2.1 `/health/live`, `/health/ready`, `/version` on coordinator and replicas; `buildinfo.BuildTime` set by the linker in the Dockerfile; `kv_build_info{version,role}`; `/health` unchanged — verified by handler tests (live while not ready, replaying → 503 "replaying", version from the binary) and `make smoke` locally
+- [x] 2.2 OpenAPI contracts updated and the contract test passes; `make smoke-aws` checks `/version` on every process (used from session 1)
 
 ## 3. Record format 3
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
+	"github.com/iravelmakina/capstone-kv/internal/health"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/store"
 )
@@ -198,6 +199,9 @@ func (r *Replica) advanceCommitLocked(lsn uint64) {
 func (r *Replica) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", r.health)
+	// Liveness, readiness and build version (M5). While the log replays, cmd/kvnode serves
+	// health.Starting instead; this handler exists only after the replay.
+	health.Register(mux, health.NewVersion("shard", r.cfg.Shard, r.cfg.Replica), r.readiness)
 	// A "GET" pattern also matches HEAD requests; the handler tells them apart.
 	mux.HandleFunc("GET /internal/v1/kv/{key}", r.observe("read", r.read))
 	mux.HandleFunc("PUT /internal/v1/kv/{key}", r.observe("write", func(w http.ResponseWriter, req *http.Request) {
@@ -633,6 +637,18 @@ func (r *Replica) Status() Status {
 
 func (r *Replica) health(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, r.Status())
+}
+
+// readiness: the log is replayed (this handler exists only after that) and the replica
+// knows its epoch and leader from a heartbeat answer; before that it can't tell whether
+// to accept writes or whom to pull from.
+func (r *Replica) readiness() (bool, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.epoch == 0 || r.leaderID == "" {
+		return false, "no leader known yet"
+	}
+	return true, ""
 }
 
 // latencies keeps the last 1024 commit waits for a p99 on the health endpoint.

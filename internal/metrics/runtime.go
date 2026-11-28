@@ -23,6 +23,15 @@ func (r *Registry) AddRuntime() {
 	r.add(&gcPauses{bounds: []float64{0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1}})
 }
 
+// AddBuildInfo registers kv_build_info{version,role} = 1 (M5, spec health-endpoints), the
+// usual "info" metric: `count by (version) (kv_build_info)` shows which releases run.
+func (r *Registry) AddBuildInfo(version, role string) {
+	r.GaugeFunc("kv_build_info", "Always 1; the labels name the release this process runs.",
+		[]string{"version", "role"}, func() []Sample {
+			return []Sample{{Labels: []string{version, role}, Value: 1}}
+		})
+}
+
 func readUint(name string) float64 {
 	s := []rm.Sample{{Name: name}}
 	rm.Read(s)

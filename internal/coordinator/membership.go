@@ -284,6 +284,39 @@ func (m *Membership) Ready() (bool, int) {
 	return len(m.shards) >= m.cfg.ExpectedShards, len(m.shards)
 }
 
+// Readiness is the rule behind GET /health/ready (M5, spec health-endpoints): Ready's
+// conditions, plus a quorum of live replicas in every set (2 of 3, what a read needs with
+// R = 2), and the reason when it isn't met. GET /health and routing keep using Ready.
+func (m *Membership) Readiness() (bool, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.shards) < m.cfg.ExpectedShards {
+		return false, fmt.Sprintf("%d of %d shards registered", len(m.shards), m.cfg.ExpectedShards)
+	}
+	ids := make([]string, 0, len(m.shards))
+	for id := range m.shards {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids) // the same reason every time, for the same state
+	quorum := m.cfg.Replicas/2 + 1
+	for _, id := range ids {
+		set := m.shards[id]
+		if info := set.replicas[set.leader]; set.leader == "" || info == nil || info.epoch < set.epoch {
+			return false, id + ": no confirmed leader"
+		}
+		live := 0
+		for _, info := range set.replicas {
+			if m.liveLocked(info) {
+				live++
+			}
+		}
+		if live < quorum {
+			return false, fmt.Sprintf("%s: %d live replicas, %d needed", id, live, quorum)
+		}
+	}
+	return true, ""
+}
+
 // WriteTarget returns the shard owning routingKey and its leader's address, if the leader
 // is alive.
 func (m *Membership) WriteTarget(routingKey []byte) (id, addr string, ok bool) {

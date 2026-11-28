@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -399,4 +400,36 @@ func TestFollowerKeepsPullingAfterEmptyLeaderAddress(t *testing.T) {
 		t.Fatalf("put after an answer without the leader's address = %d, want 200", code)
 	}
 	eventually(t, "followers at the leader's LSN", func() bool { return lastLSN(b) == 2 && lastLSN(c) == 2 })
+}
+
+// Spec health-endpoints: a replica is live at once, ready only once it knows its leader
+// and epoch; /version names its shard and replica; kv_build_info is exported.
+func TestReplicaReadinessAndVersion(t *testing.T) {
+	n := startNode(t, "1a", t.TempDir())
+	get := func(path string) (int, string) {
+		resp, err := http.Get(n.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, _ := get("/health/live"); code != 200 {
+		t.Fatalf("live = %d", code)
+	}
+	if code, body := get("/health/ready"); code != 503 || !strings.Contains(body, "no leader known yet") {
+		t.Fatalf("ready before a heartbeat = %d %s", code, body)
+	}
+	lead(1, n, n)
+	if code, body := get("/health/ready"); code != 200 {
+		t.Fatalf("ready after learning the leader = %d %s", code, body)
+	}
+	_, body := get("/version")
+	if !strings.Contains(body, `"role":"shard"`) || !strings.Contains(body, `"replica":"1a"`) {
+		t.Fatalf("/version: %s", body)
+	}
+	if v := metricValue(t, n, `kv_build_info{shard=`); v != 1 {
+		t.Fatalf("kv_build_info = %v, want 1", v)
+	}
 }

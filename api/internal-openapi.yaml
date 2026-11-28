@@ -10,6 +10,9 @@ info:
     reachable only from inside the VPC and the allowed client range. A separate admin port
     and a persisted ring are M5's design (AI review §1.1).
 
+    Replicas also serve GET /health, /health/live, /health/ready and /version, with the
+    bodies documented in api/openapi.yaml (M5, spec health-endpoints).
+
 servers:
   - url: http://localhost:8080
     description: coordinator (membership endpoints) or a shard replica (key-value and log endpoints)

@@ -475,3 +475,52 @@ func TestHealthNotReady(t *testing.T) {
 		t.Fatalf("health = %d %s; want 503 with ready false", code, body)
 	}
 }
+
+// Spec health-endpoints "Live while not ready", and the readiness reasons: shards missing,
+// then ready, then a set below a quorum of live replicas.
+func TestLivenessAndReadiness(t *testing.T) {
+	c := newCluster(t, 2, false)
+	code, body := call(t, "GET", c.coord.URL+"/health/live", "")
+	expect(t, code, body, 200)
+	code, body = call(t, "GET", c.coord.URL+"/health/ready", "")
+	expect(t, code, body, 503)
+	if !strings.Contains(body, `"reason":"0 of 2 shards registered"`) {
+		t.Fatalf("reason: %s", body)
+	}
+
+	c.beat(t)
+	code, body = call(t, "GET", c.coord.URL+"/health/ready", "")
+	expect(t, code, body, 200)
+
+	// 20 s later only 1a has reported: shard-1 has 1 live replica of the 2 a read needs.
+	c.later(20 * time.Second)
+	c.beat(t, "1a", "2a", "2b")
+	code, body = call(t, "GET", c.coord.URL+"/health/ready", "")
+	expect(t, code, body, 503)
+	if !strings.Contains(body, `shard-1: 1 live replicas, 2 needed`) {
+		t.Fatalf("reason: %s", body)
+	}
+}
+
+// Spec health-endpoints "Release check" and "No data or secrets in health answers".
+func TestVersionAndBuildInfo(t *testing.T) {
+	c := newCluster(t, 1, true)
+	code, body := call(t, "GET", c.coord.URL+"/version", "")
+	expect(t, code, body, 200)
+	if !strings.Contains(body, `"version":"dev"`) || !strings.Contains(body, `"role":"coordinator"`) {
+		t.Fatalf("/version: %s", body)
+	}
+	call(t, "POST", c.coord.URL+"/v1/tables", `{"name":"users","partitionKey":"userId"}`)
+	call(t, "PUT", c.coord.URL+"/v1/tables/users/items/secret-key", `{"v":"secret-value"}`)
+	for _, p := range []string{"/health", "/health/live", "/health/ready", "/version"} {
+		_, body := call(t, "GET", c.coord.URL+p, "")
+		if strings.Contains(body, "secret") {
+			t.Fatalf("%s leaks an item key or value: %s", p, body)
+		}
+	}
+	rec := httptest.NewRecorder()
+	c.obj.MetricsHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), `kv_build_info{version="dev",role="coordinator"} 1`) {
+		t.Fatal("no kv_build_info for the coordinator")
+	}
+}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/buildinfo"
+	"github.com/iravelmakina/capstone-kv/internal/health"
 	"github.com/iravelmakina/capstone-kv/internal/httpx"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
 	"github.com/iravelmakina/capstone-kv/internal/shard"
@@ -75,6 +76,8 @@ func New(tables *store.Store, members *Membership, r int) *Coordinator {
 func (c *Coordinator) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", c.health)
+	// Liveness, readiness and build version (M5), without a key, like /health.
+	health.Register(mux, health.NewVersion("coordinator", "", ""), c.members.Readiness)
 
 	// Public routes are observed: request ID, metrics, one log line each (ADR-0025, 0029).
 	table := func(*http.Request) string { return "table" }

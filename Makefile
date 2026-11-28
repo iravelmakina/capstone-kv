@@ -160,7 +160,7 @@ release:         ## build + upload the image of the current commit (VERSION=<sha
 	[ -n "$(BUCKET)" ] || { echo "no artifacts bucket: run make up-artifacts"; exit 1; }; \
 	if $(AWS) s3 ls s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz >/dev/null 2>&1; then \
 	  echo "release $(VERSION) already in S3, nothing to build"; exit 0; fi; \
-	docker build --platform linux/amd64 --build-arg VERSION=$(VERSION) -t capstone-kv:$(VERSION) .; \
+	docker build --platform linux/amd64 --build-arg VERSION=$(VERSION) --build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ) -t capstone-kv:$(VERSION) .; \
 	docker save capstone-kv:$(VERSION) | gzip | $(AWS) s3 cp - s3://$(BUCKET)/releases/$(VERSION)/kvnode.tar.gz; \
 	$(AWS) s3 cp scripts/node-boot.sh s3://$(BUCKET)/releases/$(VERSION)/node-boot.sh; \
 	$(AWS) s3 cp scripts/smoke.sh s3://$(BUCKET)/releases/$(VERSION)/smoke.sh; \

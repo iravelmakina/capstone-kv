@@ -26,6 +26,7 @@ import (
 
 	"github.com/iravelmakina/capstone-kv/internal/auth"
 	"github.com/iravelmakina/capstone-kv/internal/coordinator"
+	"github.com/iravelmakina/capstone-kv/internal/health"
 	"github.com/iravelmakina/capstone-kv/internal/ring"
 	"github.com/iravelmakina/capstone-kv/internal/shard"
 	"github.com/iravelmakina/capstone-kv/internal/store"
@@ -92,6 +93,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Listen before opening the logs: replaying a long log takes a while, and meanwhile the
+	// node answers /health/live (200), /version and /health/ready (503 "replaying") instead
+	// of refusing connections (M5, spec health-endpoints). The real handler replaces it
+	// once the logs are replayed.
+	api := health.NewSwap(health.Starting(health.NewVersion(*role, *shardID, *replicaID)))
+	srv := &http.Server{Addr: *listen, Handler: api, ReadHeaderTimeout: 5 * time.Second}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
 	var handler, metricsHandler http.Handler
 	var closeStore func() error
 	switch *role {
@@ -150,7 +160,7 @@ func main() {
 		log.Fatal("--role must be coordinator or shard")
 	}
 
-	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	api.Set(handler) // logs replayed: serve the real API from now on
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("GET /metrics", metricsHandler)
 	metricsSrv := &http.Server{Addr: *metricsListen, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
@@ -167,7 +177,7 @@ func main() {
 		srv.Shutdown(shutdown)
 	}()
 	log.Printf("listening on %s, metrics on %s", *listen, *metricsListen)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 	if err := closeStore(); err != nil {

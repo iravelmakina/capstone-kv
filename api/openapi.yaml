@@ -7,7 +7,7 @@ info:
     read, check and delete its items. Internal shard endpoints (/internal/v1/...) are
     not part of this contract.
 
-    Every request except /health needs an API key, `Authorization: Bearer <key>`, whose
+    Every request except /health, /health/live, /health/ready and /version needs an API key, `Authorization: Bearer <key>`, whose
     scopes allow it: read (GET, HEAD, table lists), write (PUT on items), delete (DELETE
     on items), admin (creating tables) (ADR-0027). Every answer carries `X-Request-ID`:
     the client's own, or one the coordinator made; it names the request in the logs.
@@ -43,6 +43,56 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+
+  /health/live:
+    get:
+      summary: Whether the process runs (liveness); checks nothing else
+      operationId: healthLive
+      security: []
+      responses:
+        "200":
+          description: The process runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /health/ready:
+    get:
+      summary: Whether the node can serve its role (readiness)
+      description: >-
+        Coordinator: the expected shards have registered, each has a confirmed leader and
+        a quorum (2 of 3) of live replicas. Replica: its log is replayed and it knows its
+        leader and epoch. While a node replays its log at start it answers 503 with
+        reason "replaying".
+      operationId: healthReady
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: Not ready; same body, with status "unavailable", ready false and a reason
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /version:
+    get:
+      summary: The build compiled into the running binary
+      operationId: version
+      security: []
+      responses:
+        "200":
+          description: Build information
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Version" }
 
   /v1/tables:
     post:
@@ -407,6 +457,30 @@ components:
         version:
           type: string
           description: Commit SHA the running binary was built from ("dev" for local builds)
+    Readiness:
+      type: object
+      required: [status, role, ready]
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        role: { type: string, enum: [coordinator, shard] }
+        ready: { type: boolean }
+        reason:
+          type: string
+          description: Why the node isn't ready (absent when ready)
+    Version:
+      type: object
+      required: [version, buildTime, goVersion, role]
+      properties:
+        version:
+          type: string
+          description: Commit SHA the binary was built from ("dev" for local builds)
+        buildTime:
+          type: string
+          description: When the release was built, RFC 3339 UTC ("" for local builds)
+        goVersion: { type: string }
+        role: { type: string, enum: [coordinator, shard] }
+        shard: { type: string, description: Replicas only }
+        replica: { type: string, description: Replicas only }
     Error:
       type: object
       required: [error]
