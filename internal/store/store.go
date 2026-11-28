@@ -2,13 +2,27 @@
 // append-only log on disk, replayed at start (ADR-0013). From M3 the same log is the
 // replication log (ADR-0022): followers receive the leader's records byte for byte.
 //
-// Record format (integers big-endian); new records are written in format 2 (ADR-0028),
+// Record format (integers big-endian); puts and deletes are written in format 2 (ADR-0028),
 // format 1 records (M3) are still read, with stamp 0:
 //
 //	[1 B format version][4 B body length n]
 //	body, format 1: [8 B epoch][8 B LSN][8 B prev hash][1 B op: 1=put, 2=delete][2 B key length][key][value]
 //	body, format 2: [8 B epoch][8 B LSN][8 B prev hash][8 B HLC stamp][1 B op][2 B key length][key][value]
+//	body, format 3: as format 2, with three more ops (ADR-0033)
 //	[4 B CRC-32C over everything before it]
+//
+// Format 3 adds migration control records, written in format 3 only; puts and deletes stay
+// in format 2, so a log without migrations is still readable by an M4 binary:
+//
+//   - freeze (3): the key field is an ID, the value a description of a set of keys that
+//     this replica set refuses writes to from this record on (the keys moving away in a
+//     ring change; the store doesn't interpret it, a FrozenCheck does);
+//   - unfreeze (4): lifts the freeze with that ID;
+//   - purge (5): the value lists keys (at most MaxPurgeKeys) to drop from the map without a
+//     tombstone, after they moved to another replica set.
+//
+// A complete record in a format this binary doesn't know is refused at Open, wherever it is
+// in the file, rather than cut off as if a crash had torn it.
 //
 // The stamp is a hybrid logical clock: physical milliseconds in the high 48 bits, a
 // counter in the low 16. A leader's own stamps rise with every record; a key's stamps
@@ -45,11 +59,18 @@ import (
 )
 
 const (
-	OpPut    byte = 1
-	OpDelete byte = 2
+	OpPut      byte = 1
+	OpDelete   byte = 2
+	OpFreeze   byte = 3 // format 3 only (ADR-0033)
+	OpUnfreeze byte = 4
+	OpPurge    byte = 5
+
+	// MaxPurgeKeys is the most keys one purge record lists (ADR-0033: batches of 1,000).
+	MaxPurgeKeys = 1000
 
 	format1       byte = 1                 // M3: no stamp
-	formatVersion byte = 2                 // M4: with the HLC stamp; every new record
+	formatVersion byte = 2                 // M4: with the HLC stamp; every new put and delete
+	format3       byte = 3                 // M5: format 2 plus the migration control ops
 	prefixSize         = 1 + 4             // format version + body length
 	bodyFixed1         = 8 + 8 + 8 + 1 + 2 // epoch, LSN, prev hash, op, key length
 	bodyFixed          = bodyFixed1 + 8    // format 2 adds the stamp
@@ -77,7 +98,17 @@ var (
 	ErrSuperseded = errors.New("superseded by a newer write")
 	// ErrPrecondition: an If-Match or If-None-Match condition doesn't hold.
 	ErrPrecondition = errors.New("precondition failed")
+	// ErrFrozen: the key is in a frozen set (a migration's cutover, ADR-0033); its writes
+	// go to the replica set it moves to.
+	ErrFrozen = errors.New("key is frozen: it is moving to another shard")
+	// ErrNewerFormat: the log has a complete record in a format this binary doesn't know,
+	// written by a newer release. Open refuses it instead of losing it.
+	ErrNewerFormat = errors.New("log written by a newer release")
 )
+
+// FrozenCheck reports whether key belongs to a frozen set, given the set's description
+// (a freeze record's value). The replica supplies it; the store keeps it opaque.
+type FrozenCheck func(desc []byte, key string) bool
 
 // Version orders writes: epoch first, then LSN.
 type Version struct {
@@ -147,11 +178,16 @@ type Store struct {
 	data  map[string]Entry
 	heads map[string]Head // each key's latest record in the log
 	clock uint64          // the highest stamp in the log: the HLC's last value
-	recs  []meta
-	path  string
-	f     logFile  // appends
-	rf    *os.File // reads (ReadAfter, rebuild after truncation); ReadAt is safe concurrently
-	end   int64    // offset just after the last good record: where the next append goes
+	// frozen holds the active freezes, ID -> description. Like heads it is log state: a
+	// freeze counts from its append, committed or not, because writes are decided against
+	// it (ADR-0033: the leader refuses from the moment it appends the record).
+	frozen      map[string][]byte
+	frozenCheck FrozenCheck // nil: freezes are recorded but refuse nothing
+	recs        []meta
+	path        string
+	f           logFile  // appends
+	rf          *os.File // reads (ReadAfter, rebuild after truncation); ReadAt is safe concurrently
+	end         int64    // offset just after the last good record: where the next append goes
 	// broken is set when a failed write couldn't be cut back: from then on every write
 	// fails, so nothing is ever appended after garbage. Cleared only by a restart.
 	broken error
@@ -203,6 +239,7 @@ func (s *Store) closeFiles() {
 func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 	s.data = map[string]Entry{}
 	s.heads = map[string]Head{}
+	s.frozen = map[string][]byte{}
 	s.clock = 0
 	s.recs = s.recs[:0]
 	br := bufio.NewReader(r)
@@ -225,7 +262,13 @@ func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 		}
 		n := int64(binary.BigEndian.Uint32(prefix[1:5]))
 		end := offset + prefixSize + n + sumSize
-		if prefix[0] != formatVersion && prefix[0] != format1 {
+		if !knownFormat(prefix[0]) {
+			if prefix[0] > format3 && n <= maxRecord && end <= size && complete(r, offset, end) {
+				// A whole record from a newer release, not a torn tail: cutting it off
+				// would silently drop what a newer binary wrote.
+				return offset, fmt.Errorf("%w: %s: record format %d at offset %d; run a release that reads it",
+					ErrNewerFormat, s.path, prefix[0], offset)
+			}
 			return damaged(end, fmt.Sprintf("unknown format version %d", prefix[0]))
 		}
 		if n < int64(bodyFixedOf(prefix[0])) || n > maxRecord {
@@ -248,6 +291,25 @@ func (s *Store) replay(r io.Reader, size int64) (int64, error) {
 		s.apply(rec)
 		offset = end
 	}
+}
+
+func knownFormat(f byte) bool { return f == format1 || f == formatVersion || f == format3 }
+
+// complete reports whether a record of a format we can't parse has its checksum right, i.e.
+// is whole. Only for the unknown-format check: it reads the record a second time, which
+// is fine for something that happens at most once, at Open. r must be the reader replay
+// got, a *io.SectionReader over the whole file.
+func complete(r io.Reader, offset, end int64) bool {
+	sr, ok := r.(*io.SectionReader)
+	if !ok {
+		return false
+	}
+	b := make([]byte, end-offset)
+	if _, err := sr.ReadAt(b, offset); err != nil {
+		return false
+	}
+	n := len(b) - sumSize
+	return crc32.Checksum(b[:n], castagnoli) == binary.BigEndian.Uint32(b[n:])
 }
 
 // follows checks that rec can come right after the log's last record. Callers hold the lock.
@@ -304,7 +366,7 @@ func (r Record) encode() []byte {
 
 // decode parses the bytes of one complete record and checks its checksum.
 func decode(b []byte) (Record, error) {
-	if len(b) < prefixSize+bodyFixed1+sumSize || (b[0] != formatVersion && b[0] != format1) {
+	if len(b) < prefixSize+bodyFixed1+sumSize || !knownFormat(b[0]) {
 		return Record{}, errors.New("not a record")
 	}
 	fixed := bodyFixedOf(b[0])
@@ -335,8 +397,8 @@ func decode(b []byte) (Record, error) {
 	if fixed+klen > len(p) {
 		return Record{}, errors.New("key length past end of record")
 	}
-	if rec.Op != OpPut && rec.Op != OpDelete {
-		return Record{}, fmt.Errorf("unknown op %d", rec.Op)
+	if !(rec.Op == OpPut || rec.Op == OpDelete || (b[0] == format3 && isControl(rec.Op))) {
+		return Record{}, fmt.Errorf("unknown op %d in format %d", rec.Op, b[0])
 	}
 	rec.Key = string(p[fixed : fixed+klen])
 	rec.Value = append([]byte(nil), p[fixed+klen:]...)
@@ -364,9 +426,28 @@ func DecodeRecords(raw []byte) ([]Record, error) {
 	return recs, nil
 }
 
+func isControl(op byte) bool { return op == OpFreeze || op == OpUnfreeze || op == OpPurge }
+
 // apply puts a record into the map, unless the map already holds a newer version of the
-// key: on a leader, commits can finish in any order (ADR-0023). Callers hold the lock.
+// key: on a leader, commits can finish in any order (ADR-0023). A purge drops its keys
+// (no tombstone) unless one was written after the purge; freezes don't touch the map.
+// Callers hold the lock.
 func (s *Store) apply(rec Record) {
+	switch rec.Op {
+	case OpFreeze, OpUnfreeze:
+		return // log state, kept by noteHead
+	case OpPurge:
+		keys, _ := DecodeKeys(rec.Value) // checked when written; the record's checksum holds
+		for _, k := range keys {
+			if e, ok := s.data[k]; ok && e.Version.Less(rec.Version()) {
+				delete(s.data, k)
+			}
+			if h, ok := s.heads[k]; ok && h.LSN < rec.LSN {
+				delete(s.heads, k)
+			}
+		}
+		return
+	}
 	if cur, ok := s.data[rec.Key]; ok && !cur.Version.Less(rec.Version()) {
 		return
 	}
@@ -437,6 +518,8 @@ func (s *Store) WriteVersioned(epoch uint64, op byte, key string, value []byte, 
 	defer s.mu.Unlock()
 	head, exists := s.heads[key]
 	switch {
+	case s.frozenLocked(key):
+		return Record{}, head, ErrFrozen // checked under the same lock as the freeze's append
 	case o.HasIfMatch && (!exists || head.Stamp != o.IfMatch):
 		return Record{}, head, ErrPrecondition
 	case o.IfNoneMatch && exists && !head.Deleted:
@@ -454,12 +537,18 @@ func (s *Store) WriteVersioned(epoch uint64, op byte, key string, value []byte, 
 }
 
 func (s *Store) writeLocked(epoch, stamp uint64, op byte, key string, value []byte) (Record, error) {
+	return s.writeFormatLocked(0, epoch, stamp, op, key, value)
+}
+
+// writeFormatLocked appends one record in the given format (0: the current put/delete
+// format). Callers hold the write lock.
+func (s *Store) writeFormatLocked(format byte, epoch, stamp uint64, op byte, key string, value []byte) (Record, error) {
 	last, hash := s.lastLocked()
 	if epoch < last.Epoch {
 		return Record{}, fmt.Errorf("%w: %d < %d", ErrStaleEpoch, epoch, last.Epoch)
 	}
 	rec := Record{Epoch: epoch, LSN: last.LSN + 1, Prev: hash, Stamp: stamp, Op: op, Key: key,
-		Value: append([]byte(nil), value...)} // own copy: the caller may reuse its buffer
+		Value: append([]byte(nil), value...), format: format} // own copy: the caller may reuse its buffer
 	b := rec.encode()
 	offset := s.end
 	if err := s.appendBytes(b); err != nil {
@@ -470,11 +559,109 @@ func (s *Store) writeLocked(epoch, stamp uint64, op byte, key string, value []by
 	return rec, nil
 }
 
-// noteHead records rec as its key's latest record and moves the clock past its stamp.
+// noteHead keeps the log state a record changes as soon as it is appended: the clock moves
+// past its stamp; a put or delete becomes its key's latest record; a freeze or unfreeze
+// changes the frozen sets (a control record's key field is an ID, not an item key).
 // Callers hold the lock.
 func (s *Store) noteHead(rec Record) {
-	s.heads[rec.Key] = Head{Stamp: rec.Stamp, LSN: rec.LSN, Deleted: rec.Op == OpDelete}
 	s.clock = max(s.clock, rec.Stamp)
+	switch rec.Op {
+	case OpFreeze:
+		s.frozen[rec.Key] = rec.Value
+	case OpUnfreeze:
+		delete(s.frozen, rec.Key)
+	case OpPurge:
+		// takes effect when applied (apply)
+	default:
+		s.heads[rec.Key] = Head{Stamp: rec.Stamp, LSN: rec.LSN, Deleted: rec.Op == OpDelete}
+	}
+}
+
+// frozenLocked reports whether key is in an active frozen set. Callers hold the lock.
+func (s *Store) frozenLocked(key string) bool {
+	if s.frozenCheck == nil {
+		return false
+	}
+	for _, desc := range s.frozen {
+		if s.frozenCheck(desc, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetFrozenCheck sets how the store tells whether a key is in a frozen set.
+func (s *Store) SetFrozenCheck(fc FrozenCheck) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frozenCheck = fc
+}
+
+// Frozen returns the active freezes, ID -> description (a copy).
+func (s *Store) Frozen() map[string][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][]byte, len(s.frozen))
+	for id, desc := range s.frozen {
+		out[id] = append([]byte(nil), desc...)
+	}
+	return out
+}
+
+// WriteControl appends a migration control record (OpFreeze, OpUnfreeze or OpPurge,
+// ADR-0033) in format 3, stamped by the store's clock, and flushes it. id names the freeze
+// (or the migration, for a purge); value is the frozen set's description, or for a purge
+// the keys from EncodeKeys. Like Write it doesn't apply: a freeze or unfreeze counts at
+// once (log state), a purge drops its keys when the record is applied (Apply).
+func (s *Store) WriteControl(epoch uint64, op byte, id string, value []byte) (Record, error) {
+	if !isControl(op) {
+		return Record{}, fmt.Errorf("op %d is not a control op", op)
+	}
+	if op == OpPurge {
+		keys, err := DecodeKeys(value)
+		if err != nil {
+			return Record{}, err
+		}
+		if len(keys) > MaxPurgeKeys {
+			return Record{}, fmt.Errorf("purge of %d keys: at most %d per record", len(keys), MaxPurgeKeys)
+		}
+	}
+	if len(id) > maxKey || bodyFixed+len(id)+len(value) > maxRecord {
+		return Record{}, errors.New("record too large")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeFormatLocked(format3, epoch, max(nowMillis()<<16, s.clock+1), op, id, value)
+}
+
+// EncodeKeys lays out keys for a purge record: [2 B length][key], repeated.
+func EncodeKeys(keys []string) ([]byte, error) {
+	var b []byte
+	for _, k := range keys {
+		if len(k) > maxKey {
+			return nil, errors.New("key too long")
+		}
+		b = binary.BigEndian.AppendUint16(b, uint16(len(k)))
+		b = append(b, k...)
+	}
+	return b, nil
+}
+
+// DecodeKeys reads what EncodeKeys wrote.
+func DecodeKeys(b []byte) ([]string, error) {
+	var keys []string
+	for len(b) > 0 {
+		if len(b) < 2 {
+			return nil, errors.New("key list cut short")
+		}
+		n := int(binary.BigEndian.Uint16(b))
+		if 2+n > len(b) {
+			return nil, errors.New("key list cut short")
+		}
+		keys = append(keys, string(b[2:2+n]))
+		b = b[2+n:]
+	}
+	return keys, nil
 }
 
 // Head returns the key's latest record in the log, committed or not.

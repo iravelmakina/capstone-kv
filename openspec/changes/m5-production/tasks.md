@@ -18,7 +18,7 @@
 
 ## 3. Record format 3
 
-- [ ] 3.1 `internal/store`: freeze/unfreeze and purge records (≤ 1,000 keys each) in format 3; format 2 still read; a binary given an unknown format refuses the log — store tests: replay with purge removes keys without tombstones, frozen key sets rebuilt on replay, an M4-style reader refuses format 3
+- [x] 3.1 `internal/store`: freeze/unfreeze and purge records (≤ 1,000 keys each) in format 3; format 2 still read; a binary given an unknown format refuses the log — store tests: replay with purge removes keys without tombstones, frozen key sets rebuilt on replay, a complete record in a newer format refused even as the last record (an M4 binary, which predates this check, refuses format 3 only when more records follow it; M5 starts from empty volumes)
 
 ## 4. Leader placement and transfer
 
