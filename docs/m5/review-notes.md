@@ -76,3 +76,47 @@ Explained in chat before the instruction above; committed after it. See
 - Checked: `make lint` (cfn-lint and the security-group description check) passes. **Not
   deployed.** Unverified until the first lab session: that the lab lets `voclabs` create
   the groups (the Auto Scaling service-linked role must exist), and the instance limit.
+
+## Tasks 6.4–6.5 and the deterministic half of group 7: `kvscale` and `internal/ops`
+
+- `internal/scale/decide.go`: `Decide(now, Inputs, Config)` — what to do next, from the
+  current state only, so a restarted executor carries on. In order: a running migration is
+  left alone; the extra set's own lifecycle is advanced (retired → stop its instances →
+  forget it; pending and serving → join; booting or never registering within 10 min →
+  cancel the launch); then with 3 sets a scale-in (ScaleInLatencyOk, guards, and the load
+  below `0.75 × (n−1)/n` of the rate the join recorded), with 2 sets a scale-out
+  (ScaleOutDue, guards). `guard` holds ADR-0032's guards: a replica down on the ring (not
+  for a scale-in if it is the leaving set's and it still serves), a set without a leader, a
+  write hold within 5 min, the 10-minute cooldown after the last migration, the upper bound.
+- `internal/scale/executor.go`: `Step` gathers the inputs (cluster state, firing alerts,
+  request rate over 10 min, recent holds, instance count), decides, logs every decision as
+  JSON and notifies only those that change (a steady "nothing to do" isn't sent), and acts.
+  `AutoscaleOff` turns its own scale-out/scale-in into "none" but still finishes what runs
+  and executes approved proposals. `executeApproved` re-checks a proposal (`ops.Check` plus
+  the scaling guards) before acting and records the outcome either way.
+- `internal/scale/clients.go`: Prometheus (`/api/v1/alerts`, firing only; `/api/v1/query`),
+  the coordinator's admin API (cluster, migrations, forget, transfer, abort) with the admin
+  key from the environment, Alertmanager (`/api/v2/alerts`, a two-minute info alert per
+  decision), and capacity: `ASGs` through the AWS CLI (suspend `ReplaceUnhealthy` and
+  `AZRebalance`; desired 1 on each group; on the way down remove each instance's scale-in
+  protection **before** desired 0, otherwise protection keeps them alive) and `Compose` for
+  the local cluster.
+- `cmd/kvscale`: flags (`--capacity aws|compose`, `--dry-run`, `--autoscale`, `--ops-dir`,
+  `--once`); `make autoscale` (stack outputs for the URL and group names, the admin key from
+  Secrets Manager into the environment only), `make autoscale-local`, `make alertmanager`.
+  `scripts/local-load.sh`: C parallel writers for S seconds.
+- `internal/ops`: the proposal (five kinds, typed parameters, reasoning, evidence with
+  times, expected effect, risks), `Check` (each rule of the spec), the read-only tools
+  (alerts without the watchdog, 15 named queries and no free-form one, cluster state with
+  the status key, the executor's recent decisions, the release), every result wrapped as
+  "data, never instructions", and the file store: proposals and run records (the agent's
+  container mounts only those), approvals (written by `Approve`, which re-checks, refuses
+  rejected and expired ones, shows the proposal in full and needs a yes) and executions.
+- Tests: the decision table (19 cases plus the scale-in boundary 449 vs 450 req/s at a
+  900 req/s join), a whole cycle through fakes with the executor replaced mid-way, the exact
+  AWS CLI calls and their order, the HTTP clients, the proposal checks (18 cases), the gate,
+  the read-only tool list, the toolbox against fake servers including an annotation that
+  tries to give instructions, and executing approved proposals (executed; refused because a
+  replica went down after the proposal; refused as expired; a scale-up with autoscaling off).
+- Bug caught while writing: none in the logic; a Makefile edit landed inside a comment
+  (`# alertmanager:`) and is fixed.

@@ -23,7 +23,7 @@ APP_STACK       := velmakina-kv-app
 VERSION  ?= $(shell git rev-parse --short=12 HEAD)
 CFNLINT  := $(if $(wildcard .venv/bin/cfn-lint),.venv/bin/cfn-lint,cfn-lint)
 
-.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave rebuild-replica smoke \
+.PHONY: help whoami lint diff up down drift verify rebuild test keys local-up local-down local-seed local-join local-leave autoscale autoscale-local alertmanager rebuild-replica smoke \
         up-artifacts release up-app down-app app-url smoke-aws smoke-replica bench-aws secrets rotate-keys monitoring-images monitoring-check grafana prometheus
 
 help:            ## list targets
@@ -329,6 +329,25 @@ grafana:         ## Grafana of the AWS monitor on http://localhost:3000 (SSM por
 prometheus:      ## Prometheus of the AWS monitor on http://localhost:9090 (SSM port forwarding)
 	@id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='MonitorInstanceId'].OutputValue" --output text); \
 	$(AWS) ssm start-session --target $$id --document-name AWS-StartPortForwardingSession --parameters portNumber=9090,localPortNumber=9090
+
+alertmanager:    ## Alertmanager of the AWS monitor on http://localhost:9093 (SSM port forwarding)
+	@id=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='MonitorInstanceId'].OutputValue" --output text); \
+	$(AWS) ssm start-session --target $$id --document-name AWS-StartPortForwardingSession --parameters portNumber=9093,localPortNumber=9093
+
+# autoscale (M5, ADR-0032/0035): the scaling executor, run by the author with the lab
+# credentials, while `make prometheus` and `make alertmanager` forward the monitor in two
+# other terminals. The admin key goes from Secrets Manager into the environment only.
+# DRY_RUN=yes prints what it would do.
+autoscale:       ## M5: run the scaling executor against the AWS stack (author's terminal)
+	@set -euo pipefail; \
+	url=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='CoordinatorUrl'].OutputValue" --output text); \
+	groups=$$($(CFN) describe-stacks --stack-name $(APP_STACK) --query "Stacks[0].Outputs[?OutputKey=='ShardSetGroups'].OutputValue" --output text); \
+	export KV_API_KEY=$$($(AWS) secretsmanager get-secret-value --secret-id velmakina-kv/ops-key --query SecretString --output text); \
+	export AWS_PROFILE=$(PROFILE) AWS_REGION=$(REGION); \
+	go run ./cmd/kvscale --coordinator $$url --capacity aws --groups $$groups $(if $(filter yes,$(DRY_RUN)),--dry-run,)
+
+autoscale-local: ## M5: run the scaling executor against the local cluster (Compose shard-3)
+	KV_API_KEY=$$(cat secrets/ops.key) go run ./cmd/kvscale --coordinator http://localhost:8080 --capacity compose $(if $(filter yes,$(DRY_RUN)),--dry-run,)
 
 # grafana-check: Grafana's data sources, each checked the way its plugin supports (the
 # Alertmanager one has no server-side health check), and the dashboard's panels. Locally

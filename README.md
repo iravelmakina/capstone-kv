@@ -173,6 +173,31 @@ http://localhost:3000 through SSM port forwarding (needs the AWS CLI's Session M
 plugin), and `make grafana-check` in another terminal checks it. `make rotate-keys` reloads
 changed keys without a restart.
 
+### Autoscaling (M5)
+
+The executor `cmd/kvscale` (ADR-0032, ADR-0035) adds the replica set shard-3 when a shard's
+p99 is over its scale-out edge (writes 50 ms, reads 12 ms, confirmed by the shard's own
+latency, at >= 100 requests/s), and removes it when every shard has stayed below for 10
+minutes and the load has dropped under half of what it was at the scale-out. It never acts
+while a replica is down, a migration or a write hold runs, or within 10 minutes of the last
+change; it keeps 2-3 replica sets. Each step and each blocked decision is a JSON line on its
+output and a message in the alert chat.
+
+It runs **in your terminal, with your lab credentials**, for the length of a session:
+nothing in the sandbox can hold the credentials to change capacity, so with the laptop off
+there is no autoscaling (a production setup would give the executor its own role).
+
+```bash
+make prometheus      # terminal 1: the monitor's Prometheus on localhost:9090
+make alertmanager    # terminal 2: its Alertmanager on localhost:9093
+make autoscale       # terminal 3: the executor (DRY_RUN=yes prints what it would do)
+```
+
+Locally, `make local-up`, then `make autoscale-local` starts and stops the Compose services
+`r3a`–`r3c` instead of the Auto Scaling groups; `scripts/local-load.sh 64 600` gives it load.
+`make up-app` refuses to run while shard-3 has instances (a stack update must not cut a
+replica set off without moving its keys); scale in first, or `SCALED_OK=yes`.
+
 Rollback: run the **ci-cd** workflow by hand with an earlier release SHA, or
 `make up-app VERSION=<sha>` (then `make smoke-aws VERSION=<sha>`).
 
