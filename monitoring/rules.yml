@@ -60,6 +60,17 @@ groups:
           summary: "{{ $labels.shard }} has no live leader"
           description: "Writes to {{ $labels.shard }} get 503 and no promotion has happened (runbook: ShardWithoutLeader)."
 
+      # Two leaders on one node while a follower could take one elsewhere (ADR-0036): losing
+      # that node would stop two shards' writes. Nothing moves on its own; the ops agent
+      # proposes a transfer and a person approves it.
+      - alert: LeadersColocated
+        expr: kv_leaders_colocated > 0
+        for: 2m
+        labels: { severity: info }
+        annotations:
+          summary: "{{ $value }} shard leader(s) share a node with another leader"
+          description: "A follower on a node without a leader could take over; see kv_node_leaders (runbook: LeadersColocated)."
+
       - alert: ScrapeFailing
         expr: up{job="replica"} == 0
         for: 30s

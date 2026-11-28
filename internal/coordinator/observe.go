@@ -92,6 +92,21 @@ func newCoordMetrics(m *Membership) *coordMetrics {
 			}
 			return out
 		})
+	reg.GaugeFunc("kv_node_leaders", "Shard leaders running on each node (ADR-0036: at most one where possible).",
+		[]string{"node"}, func() []metrics.Sample {
+			perNode, _ := m.LeaderPlacement()
+			out := make([]metrics.Sample, 0, len(perNode))
+			for node, n := range perNode {
+				out = append(out, metrics.Sample{Labels: []string{node}, Value: float64(n)})
+			}
+			return out
+		})
+	reg.Gauge("kv_leaders_colocated",
+		"Shards whose leader shares a node with another leader while a live follower is on a leaderless node.",
+		func() float64 {
+			_, colocated := m.LeaderPlacement()
+			return float64(len(colocated))
+		})
 	reg.AddRuntime()
 	reg.AddBuildInfo(buildinfo.Version, "coordinator")
 	return cm

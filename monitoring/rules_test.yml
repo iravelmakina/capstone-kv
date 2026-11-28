@@ -183,3 +183,24 @@ tests:
             exp_annotations:
               summary: The monitor is alive
               description: "An hour without this message means the monitor is down (runbook: Watchdog)."
+
+  # Two leaders on one node for 2 minutes: LeadersColocated (ADR-0036); a minute isn't
+  # enough, and a placement that is fixed doesn't fire.
+  - interval: 15s
+    input_series:
+      - series: 'kv_leaders_colocated'
+        values: "1x12 0x8"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LeadersColocated
+        exp_alerts: []
+      - eval_time: 2m30s
+        alertname: LeadersColocated
+        exp_alerts:
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: "1 shard leader(s) share a node with another leader"
+              description: "A follower on a node without a leader could take over; see kv_node_leaders (runbook: LeadersColocated)."
+      - eval_time: 4m30s
+        alertname: LeadersColocated
+        exp_alerts: []

@@ -69,6 +69,7 @@ func main() {
 	vnodes := flag.Int("vnodes", envInt("KV_VNODES", ring.DefaultVirtualNodes), "virtual nodes per shard (ADR-0011)")
 	apiKeys := flag.String("api-keys-file", env("KV_API_KEYS_FILE", ""), "API key hashes and scopes (ADR-0027); empty = no keys required")
 	timeout := flag.Duration("heartbeat-timeout", envDuration("KV_HEARTBEAT_TIMEOUT", 15*time.Second), "silence after which a replica is unavailable")
+	firstWait := flag.Duration("first-leader-wait", envDuration("KV_FIRST_LEADER_WAIT", 3*time.Minute), "how long a new set waits for all its replicas before choosing its first leader from a majority (ADR-0036)")
 
 	// Replica settings.
 	shardID := flag.String("shard", env("KV_SHARD", ""), "replica set this replica belongs to, e.g. shard-1")
@@ -117,7 +118,7 @@ func main() {
 		closeStore = func() error { leaderStore.Close(); return tables.Close() }
 		members, err := coordinator.NewMembership(ring.New(*vnodes), coordinator.MembershipConfig{
 			Timeout: *timeout, ExpectedShards: *expected, Replicas: *replicas,
-			Leaders: leaderStore, Preferred: parsePairs(*leaders),
+			Leaders: leaderStore, Preferred: parsePairs(*leaders), FirstLeaderWait: *firstWait,
 		})
 		if err != nil {
 			log.Fatalf("load leader assignments: %v", err)

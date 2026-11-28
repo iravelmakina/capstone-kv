@@ -24,6 +24,9 @@ type MembershipConfig struct {
 	Leaders        *store.Store      // persisted leader and epoch per shard (ADR-0020)
 	Preferred      map[string]string // shard -> replica to make the first leader, if it can be
 	AskTimeout     time.Duration     // per follower, when asking before a promotion (1 s)
+	// FirstLeaderWait is how long a new set waits for all its replicas before its first
+	// leader is chosen from a majority (ADR-0036: 3 minutes; M4 saw nodes 1–2 minutes late).
+	FirstLeaderWait time.Duration
 }
 
 // Membership tracks every replica set: its replicas, whether each is alive, and its leader
@@ -68,6 +71,9 @@ func NewMembership(r *ring.Ring, cfg MembershipConfig) (*Membership, error) {
 	}
 	if cfg.AskTimeout == 0 {
 		cfg.AskTimeout = time.Second
+	}
+	if cfg.FirstLeaderWait == 0 {
+		cfg.FirstLeaderWait = 3 * time.Minute
 	}
 	m := &Membership{cfg: cfg, shards: map[string]*replicaSet{}, ring: r, now: time.Now,
 		client: &http.Client{Timeout: cfg.AskTimeout}}
@@ -122,40 +128,66 @@ func (m *Membership) answerLocked(set *replicaSet) shard.HeartbeatAnswer {
 	return a
 }
 
-// assignFirstLeaderLocked picks the first leader of a set: among the live replicas, the
-// one with the newest last record (it has everything any other has); on a tie, the
-// preferred replica, then the lowest ID. It waits for all replicas, so the preferred one
-// gets the chance to lead (ADR-0020: the two shards' leaders on different nodes), but not
-// longer than one timeout once a majority is there, so a dead replica can't block a start.
-// Callers hold m.mu.
-func (m *Membership) assignFirstLeaderLocked(id string, set *replicaSet) error {
-	type cand struct {
-		id   string
-		last store.Version
-	}
-	var cands []cand
-	var maxEpoch uint64
-	for rid, info := range set.replicas {
-		if m.liveLocked(info) {
-			cands = append(cands, cand{rid, info.last})
-			maxEpoch = max(maxEpoch, info.epoch, info.last.Epoch)
-		}
-	}
-	waited := m.now().Sub(set.firstSeen) > m.cfg.Timeout
-	if len(cands) < m.cfg.Replicas && (len(cands) <= m.cfg.Replicas/2 || !waited) {
-		return nil // wait for the rest, or at least for a majority and the timeout
-	}
-	pref := m.cfg.Preferred[id]
+// candidate is a replica that could lead: its ID, its last record, and its node.
+type candidate struct {
+	id   string
+	last store.Version
+	node string
+}
+
+// rankCandidates sorts candidates best first (ADR-0036): the newest last record first,
+// which is the safety rule and always wins (ADR-0020); among equals, one on a node that
+// leads no other shard; then the preferred replica; then the lowest ID.
+func rankCandidates(cands []candidate, busy map[string]int, preferred string) {
 	sort.Slice(cands, func(i, j int) bool {
 		a, b := cands[i], cands[j]
 		if a.last != b.last {
 			return b.last.Less(a.last)
 		}
-		if (a.id == pref) != (b.id == pref) {
-			return a.id == pref
+		if aFree, bFree := busy[a.node] == 0, busy[b.node] == 0; aFree != bFree {
+			return aFree
+		}
+		if (a.id == preferred) != (b.id == preferred) {
+			return a.id == preferred
 		}
 		return a.id < b.id
 	})
+}
+
+// leaderNodesLocked counts, per node, the shards other than except whose leader runs
+// there. Callers hold m.mu.
+func (m *Membership) leaderNodesLocked(except string) map[string]int {
+	busy := map[string]int{}
+	for id, set := range m.shards {
+		if id == except || set.leader == "" {
+			continue
+		}
+		if info := set.replicas[set.leader]; info != nil {
+			busy[nodeOf(info.address)]++
+		}
+	}
+	return busy
+}
+
+// assignFirstLeaderLocked picks the first leader of a set from its live replicas, ranked by
+// rankCandidates. It waits for all replicas, so the preferred one gets the chance to lead
+// and leaders land on different nodes (ADR-0020), but not longer than FirstLeaderWait once
+// a majority is there, so a dead replica can't block a start (ADR-0036: a node late by a
+// minute or two used to leave both leaders on another node). Callers hold m.mu.
+func (m *Membership) assignFirstLeaderLocked(id string, set *replicaSet) error {
+	var cands []candidate
+	var maxEpoch uint64
+	for rid, info := range set.replicas {
+		if m.liveLocked(info) {
+			cands = append(cands, candidate{rid, info.last, nodeOf(info.address)})
+			maxEpoch = max(maxEpoch, info.epoch, info.last.Epoch)
+		}
+	}
+	waited := m.now().Sub(set.firstSeen) > m.cfg.FirstLeaderWait
+	if len(cands) < m.cfg.Replicas && (len(cands) <= m.cfg.Replicas/2 || !waited) {
+		return nil // wait for the rest, or at least for a majority and FirstLeaderWait
+	}
+	rankCandidates(cands, m.leaderNodesLocked(id), m.cfg.Preferred[id])
 	return m.setLeaderLocked(id, set, cands[0].id, maxEpoch+1)
 }
 
@@ -193,6 +225,7 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 		id        string
 		epoch     uint64
 		followers map[string]string // replica -> address
+		busy      map[string]int    // nodes leading other shards, for the tie-break
 	}
 	var jobs []job
 	m.mu.RLock()
@@ -200,7 +233,7 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 		if set.leader == "" || m.liveLocked(set.replicas[set.leader]) {
 			continue
 		}
-		j := job{id: id, epoch: set.epoch, followers: map[string]string{}}
+		j := job{id: id, epoch: set.epoch, followers: map[string]string{}, busy: m.leaderNodesLocked(id)}
 		for rid, info := range set.replicas {
 			if rid != set.leader && m.liveLocked(info) {
 				j.followers[rid] = info.address
@@ -213,7 +246,8 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 	m.mu.RUnlock()
 
 	for _, j := range jobs {
-		best, bestLast, ok := "", store.Version{}, true
+		var cands []candidate
+		ok := true
 		for rid, addr := range j.followers {
 			last, err := m.askLast(ctx, addr)
 			if err != nil {
@@ -221,13 +255,14 @@ func (m *Membership) CheckLeaders(ctx context.Context) {
 				ok = false
 				break
 			}
-			if best == "" || bestLast.Less(last) || (last == bestLast && rid < best) {
-				best, bestLast = rid, last
-			}
+			cands = append(cands, candidate{rid, last, nodeOf(addr)})
 		}
 		if !ok {
 			continue
 		}
+		// Newest last record first (safety); among equals a node leading nothing else.
+		rankCandidates(cands, j.busy, "")
+		best := cands[0].id
 		m.mu.Lock()
 		set := m.shards[j.id]
 		if set != nil && set.epoch == j.epoch && !m.liveLocked(set.replicas[set.leader]) {
@@ -315,6 +350,39 @@ func (m *Membership) Readiness() (bool, string) {
 		}
 	}
 	return true, ""
+}
+
+// LeaderPlacement reports, for every node the coordinator knows, how many shard leaders run
+// there (0 included), and which shards are colocated: their leader shares a node with
+// another leader while one of their live followers is on a node that leads nothing. Those
+// are the shards a planned transfer could spread out (ADR-0036; the ops agent's input
+// through LeadersColocated).
+func (m *Membership) LeaderPlacement() (perNode map[string]int, colocated []string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	perNode = map[string]int{}
+	for _, set := range m.shards {
+		for _, info := range set.replicas {
+			perNode[nodeOf(info.address)] += 0 // every known node gets a row
+		}
+	}
+	for n, c := range m.leaderNodesLocked("") {
+		perNode[n] = c
+	}
+	for id, set := range m.shards {
+		leader := set.replicas[set.leader]
+		if leader == nil || perNode[nodeOf(leader.address)] < 2 {
+			continue
+		}
+		for rid, info := range set.replicas {
+			if rid != set.leader && m.liveLocked(info) && perNode[nodeOf(info.address)] == 0 {
+				colocated = append(colocated, id)
+				break
+			}
+		}
+	}
+	sort.Strings(colocated)
+	return perNode, colocated
 }
 
 // WriteTarget returns the shard owning routingKey and its leader's address, if the leader

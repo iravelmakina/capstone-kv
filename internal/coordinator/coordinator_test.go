@@ -281,10 +281,14 @@ func TestNotReadyUntilShardsRegister(t *testing.T) {
 	c.beat(t, "2a")            // one replica isn't a majority: no leader yet
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 503)
-	c.beat(t, "2a", "2b") // 2c stays down: a majority, but the set waits one timeout for 2c
+	c.beat(t, "2a", "2b") // 2c stays down: a majority, but the set waits for 2c (ADR-0036)
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 503)
-	c.later(20 * time.Second)
+	c.later(20 * time.Second) // one heartbeat timeout used to be enough; now it isn't
+	c.beat(t, "1a", "1b", "1c", "2a", "2b")
+	code, body = call(t, "GET", url, "")
+	expect(t, code, body, 503)
+	c.later(3*time.Minute + time.Second) // FirstLeaderWait passed
 	c.beat(t, "1a", "1b", "1c", "2a", "2b")
 	code, body = call(t, "GET", url, "")
 	expect(t, code, body, 404) // ready: the item just doesn't exist

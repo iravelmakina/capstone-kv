@@ -61,6 +61,16 @@ Writes to that shard get 503; reads too if fewer than 2 replicas are live.
 silent, the coordinator promotes the more up-to-date one. Never force a promotion by hand:
 that is how committed writes get lost.
 
+## LeadersColocated (info, M5)
+
+**Means:** for 2 minutes a node has led two or more shards while one of those shards has a
+live follower on a node that leads nothing (ADR-0036). Nothing is broken, but losing that
+node would stop two shards' writes at once (M4 drill D2: ≈ 0.93% of an hour's requests).
+**Check:** `kv_node_leaders` per node; `GET /internal/v1/shards` for leaders and addresses.
+**Do:** nothing moves on its own. Let the ops agent propose a `transfer_leader` and approve
+it, or call `POST /v1/admin/shards/{id}/leader` yourself (M5 task 4.2). Not during a
+migration or a node failure.
+
 ## ScrapeFailing (warning)
 
 **Means:** Prometheus can't reach a replica's metrics port, though the coordinator may still
