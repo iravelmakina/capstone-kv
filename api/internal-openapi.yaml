@@ -20,6 +20,17 @@ info:
     with {epoch, leader, leaderAddress} (200 {epoch}). Heartbeat answers carry
     "transferring": true while a transfer of the set runs.
 
+    Key migration (M5, ADR-0033; internal/shard/migrate.go), coordinator to a set's leader,
+    all POST with a JSON body carrying the ring change {id, before, after, vnodes}; 409 on a
+    replica that doesn't lead: /internal/v1/migrate/commit ({commit, epoch}),
+    /internal/v1/migrate/state ({target, upto, after, limit}: a page of the moving keys'
+    records as of the commit point), /internal/v1/migrate/tail ({target, from, limit}: the
+    committed records after "from" whose keys move to the target, and how far it scanned),
+    /internal/v1/migrate/freeze ({unfreeze}: a replicated freeze record, after which writes to
+    the moving keys get 409 "moved"), /internal/v1/migrate/purge ({which: away|in}),
+    /internal/v1/migrate/apply ({copies}: applied if newer, replicated; 400 for a key that
+    doesn't move to this set).
+
 servers:
   - url: http://localhost:8080
     description: coordinator (membership endpoints) or a shard replica (key-value and log endpoints)

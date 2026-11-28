@@ -634,6 +634,98 @@ func (s *Store) WriteControl(epoch uint64, op byte, id string, value []byte) (Re
 	return s.writeFormatLocked(format3, epoch, max(nowMillis()<<16, s.clock+1), op, id, value)
 }
 
+// Copy is one key's state carried by a migration (ADR-0033): its value or a tombstone, and
+// the stamp its source gave it.
+type Copy struct {
+	Key     string `json:"key"`
+	Value   []byte `json:"value,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+	Stamp   uint64 `json:"stamp"`
+}
+
+// Snapshot returns, sorted by key, the keys after `after` that match, whose current entry
+// (value or tombstone) was written at or before LSN upto: the state as of that commit
+// point. A key rewritten after upto is left out; the log tail from upto carries its newer
+// record, which is the one that counts. At most limit entries; more reports whether some
+// were left.
+func (s *Store) Snapshot(after string, limit int, upto uint64, match func(key string) bool) (out []Copy, more bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0)
+	for k, e := range s.data {
+		if k > after && e.Version.LSN <= upto && match(k) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) > limit {
+		keys, more = keys[:limit], true
+	}
+	for _, k := range keys {
+		e := s.data[k]
+		out = append(out, Copy{Key: k, Value: e.Value, Deleted: e.Deleted, Stamp: e.Stamp})
+	}
+	return out, more
+}
+
+// ApplyCopies appends, in one write and one fsync, a put or delete for every copy newer
+// than the key's latest record here (last-write-wins by stamp, ADR-0028), each with its
+// source stamp; a copy that isn't newer is skipped, and the clock moves past every stamp
+// either way (the HLC receive rule), so later writes here stamp above copied records. Like
+// Write it doesn't apply: the leader applies once the records commit. It returns how many
+// were appended and the last LSN (0 if none).
+func (s *Store) ApplyCopies(epoch uint64, copies []Copy) (int, uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, hash := s.lastLocked()
+	if epoch < last.Epoch {
+		return 0, 0, fmt.Errorf("%w: %d < %d", ErrStaleEpoch, epoch, last.Epoch)
+	}
+	var buf []byte
+	var recs []Record
+	var metas []meta
+	offset := s.end
+	pending := map[string]uint64{} // stamps appended in this batch, by key
+	for _, c := range copies {
+		if c.Stamp == 0 || len(c.Key) > maxKey || bodyFixed+len(c.Key)+len(c.Value) > maxRecord {
+			return 0, 0, fmt.Errorf("copy of %q: bad stamp or too large", c.Key)
+		}
+		s.clock = max(s.clock, c.Stamp)
+		newest := pending[c.Key]
+		if h, ok := s.heads[c.Key]; ok {
+			newest = max(newest, h.Stamp)
+		}
+		if c.Stamp <= newest {
+			continue // what is here is as new or newer: keep it
+		}
+		op := OpPut
+		value := c.Value
+		if c.Deleted {
+			op, value = OpDelete, nil
+		}
+		rec := Record{Epoch: epoch, LSN: last.LSN + 1, Prev: hash, Stamp: c.Stamp, Op: op, Key: c.Key,
+			Value: append([]byte(nil), value...)}
+		b := rec.encode()
+		h := xxhash.Sum64(b)
+		metas = append(metas, meta{offset: offset + int64(len(buf)), epoch: epoch, hash: h})
+		buf = append(buf, b...)
+		recs = append(recs, rec)
+		pending[c.Key] = c.Stamp
+		last, hash = rec.Version(), h
+	}
+	if len(buf) == 0 {
+		return 0, 0, nil
+	}
+	if err := s.appendBytes(buf); err != nil {
+		return 0, 0, err
+	}
+	s.recs = append(s.recs, metas...)
+	for _, rec := range recs {
+		s.noteHead(rec)
+	}
+	return len(recs), last.LSN, nil
+}
+
 // EncodeKeys lays out keys for a purge record: [2 B length][key], repeated.
 func EncodeKeys(keys []string) ([]byte, error) {
 	var b []byte
@@ -879,6 +971,21 @@ func (s *Store) Keys() []string {
 			keys = append(keys, k)
 		}
 	}
+	return keys
+}
+
+// KeysWhere returns every key in the map that matches, tombstones included, sorted (a
+// purge's list, ADR-0033).
+func (s *Store) KeysWhere(match func(key string) bool) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var keys []string
+	for k := range s.data {
+		if match(k) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
 	return keys
 }
 

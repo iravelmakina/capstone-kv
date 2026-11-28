@@ -116,6 +116,7 @@ func NewReplica(st *store.Store, cfg Config) *Replica {
 		changed:  make(chan struct{}),
 	}
 	r.initMetrics()
+	st.SetFrozenCheck(r.frozenCheck) // refuse writes to keys a freeze record moves away (ADR-0033)
 	return r
 }
 
@@ -242,6 +243,7 @@ func (r *Replica) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/stepdown", r.stepDown)
 	mux.HandleFunc("POST /internal/v1/resume", r.resume)
 	mux.HandleFunc("POST /internal/v1/epoch", r.pushEpoch)
+	r.migrateRoutes(mux) // key migration (ADR-0033, migrate.go)
 	return mux
 }
 
@@ -318,6 +320,11 @@ func (r *Replica) write(w http.ResponseWriter, req *http.Request, op byte, key s
 			w.Header().Set("ETag", etag(head.Stamp))
 		}
 		httpx.WriteError(w, http.StatusPreconditionFailed, "the item's version doesn't match the request's condition")
+		return
+	case errors.Is(err, store.ErrFrozen):
+		// The key is moving to another set and its cutover has begun: the coordinator
+		// waits for the switch and sends the write to the new owner (ADR-0033).
+		httpx.WriteError(w, http.StatusConflict, "moved: the key is moving to another shard; retry")
 		return
 	case errors.Is(err, store.ErrSuperseded):
 		// Last-write-wins: a newer write to the key exists. Say so only once that newer
